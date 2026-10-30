@@ -1,0 +1,7 @@
+# 声明本项目是独立的 pnpm 根，避免 pnpm 向上爬到 C:\Users\Alpha 的杂项 workspace。
+packages:
+  - '.'
+
+# pnpm 11 默认拦截依赖的构建脚本；esbuild 必须放行，否则 vite 无法构建。
+allowBuilds:
+  esbuild: set this to true or false

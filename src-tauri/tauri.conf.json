@@ -1,0 +1,37 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Click2Get",
+  "version": "0.1.0",
+  "identifier": "com.click2get.app",
+  "build": {
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Click2Get",
+        "width": 900,
+        "height": 720,
+        "minWidth": 460,
+        "minHeight": 380,
+        "resizable": true,
+        "visible": true,
+        "backgroundColor": "#0E0E10",
+        "additionalBrowserArgs": "--disable-gpu --disable-background-networking --disable-component-update --disable-sync --js-flags=--max-old-space-size=192"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'none'; img-src 'self' asset: http://asset.localhost data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src ipc: http://ipc.localhost",
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["$APPLOCALDATA/images/**"]
+      }
+    }
+  },
+  "bundle": {
+    "active": false,
+    "targets": "nsis",
+    "icon": ["icons/icon.ico"]
+  }
+}

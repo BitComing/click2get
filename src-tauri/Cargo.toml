@@ -1,0 +1,36 @@
+[package]
+name = "click2get"
+version = "0.1.0"
+description = "Click2Get - clipboard capture notes"
+authors = ["click2get"]
+edition = "2021"
+rust-version = "1.77"
+
+[build-dependencies]
+# 锁定精确版本：2.7.4 是 tauri 2.12.5 官方配对的 build 脚本版本
+tauri-build = { version = "=2.7.4", features = [] }
+
+[dependencies]
+tauri = { version = "=2.12.5", features = ["tray-icon", "image-png", "protocol-asset"] }
+tauri-plugin-single-instance = "=2.5.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+base64 = "0.22"
+image = { version = "=0.25.10", default-features = false, features = ["png", "bmp"] }
+windows = { version = "=0.62.2", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_DataExchange",
+  "Win32_System_Memory",
+  "Win32_System_Threading",
+  "Win32_System_LibraryLoader",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
+[profile.release]
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true
+codegen-units = 1

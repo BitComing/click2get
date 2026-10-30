@@ -1,0 +1,8 @@
+# 默认按文本处理，仓库内统一 LF，避免 Windows 上换行抖动
+* text=auto eol=lf
+
+# 二进制
+*.png binary
+*.ico binary
+*.exe binary
+*.db binary

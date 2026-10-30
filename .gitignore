@@ -1,0 +1,22 @@
+# 依赖与构建产物
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/
+
+# 本地环境
+.env
+.env.local
+*.log
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+*.swp
+
+# 临时文件（note.json 的原子写中间态）
+*.tmp
+note.json
+note.json.bak
