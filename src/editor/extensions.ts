@@ -66,7 +66,7 @@ export const CaptureImage = Image.extend({
         src: fileUrl(path as string),
         'data-hash': hash ?? '',
         loading: 'lazy',
-        draggable: 'false',
+        draggable: 'true',
       }),
     ]
   },

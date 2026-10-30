@@ -44,11 +44,15 @@ fn safe_id(id: &str) -> Option<&str> {
 }
 
 fn new_id() -> String {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static SEQ: AtomicU32 = AtomicU32::new(0);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.subsec_nanos())
         .unwrap_or(0);
-    format!("n{}_{:04x}", now_ms(), (nanos ^ (now_ms() as u32)) & 0xffff)
+    // 加一个自增序号：同一毫秒内连点两次"新建笔记"也不会撞 id
+    let seq = SEQ.fetch_add(1, Ordering::SeqCst);
+    format!("n{}_{:04x}{:02x}", now_ms(), (nanos ^ (now_ms() as u32)) & 0xffff, seq & 0xff)
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -75,7 +79,7 @@ pub fn empty_doc() -> Value {
     json!({ "type": "doc", "content": [{ "type": "paragraph" }] })
 }
 
-fn read_note(path: &Path) -> Option<(NoteMeta, Value, Vec<Value>)> {
+fn read_note(path: &Path) -> Option<(NoteMeta, Value, Vec<Value>, bool)> {
     let raw = fs::read_to_string(path).ok()?;
     let v: Value = serde_json::from_str(&raw).ok()?;
     let id = v.get("id")?.as_str()?.to_string();
@@ -92,6 +96,10 @@ fn read_note(path: &Path) -> Option<(NoteMeta, Value, Vec<Value>)> {
         .and_then(|p| p.as_array())
         .cloned()
         .unwrap_or_default();
+    let title_locked = v
+        .get("titleLocked")
+        .and_then(|b| b.as_bool())
+        .unwrap_or(false);
     Some((
         NoteMeta {
             id,
@@ -101,6 +109,7 @@ fn read_note(path: &Path) -> Option<(NoteMeta, Value, Vec<Value>)> {
         },
         doc,
         pending,
+        title_locked,
     ))
 }
 
@@ -114,7 +123,7 @@ pub fn list(dir: &Path) -> Vec<NoteMeta> {
             if p.extension().and_then(|x| x.to_str()) != Some("json") {
                 continue;
             }
-            if let Some((meta, _, _)) = read_note(&p) {
+            if let Some((meta, _, _, _)) = read_note(&p) {
                 out.push(meta);
             }
         }
@@ -131,6 +140,7 @@ pub fn create(dir: &Path, title: &str) -> Result<NoteFull, String> {
         "version": 1,
         "id": id,
         "title": title,
+        "titleLocked": false,
         "createdAt": now,
         "updatedAt": now,
         "doc": doc,
@@ -150,8 +160,8 @@ pub fn create(dir: &Path, title: &str) -> Result<NoteFull, String> {
 
 pub fn load(dir: &Path, id: &str) -> Result<NoteFull, String> {
     let id = safe_id(id).ok_or_else(|| "非法的笔记 id".to_string())?;
-    let (meta, doc, pending) = read_note(&note_path(dir, id))
-        .ok_or_else(|| "笔记不存在或已损坏".to_string())?;
+    let (meta, doc, pending, _) =
+        read_note(&note_path(dir, id)).ok_or_else(|| "笔记不存在或已损坏".to_string())?;
     Ok(NoteFull {
         id: meta.id,
         title: meta.title,
@@ -165,7 +175,7 @@ pub fn load(dir: &Path, id: &str) -> Result<NoteFull, String> {
 pub fn save(dir: &Path, id: &str, doc: Value) -> Result<NoteMeta, String> {
     let id = safe_id(id).ok_or_else(|| "非法的笔记 id".to_string())?.to_string();
     let path = note_path(dir, &id);
-    let (meta, _, pending) = read_note(&path).unwrap_or((
+    let (meta, _, pending, locked) = read_note(&path).unwrap_or((
         NoteMeta {
             id: id.clone(),
             title: "无标题笔记".into(),
@@ -174,27 +184,88 @@ pub fn save(dir: &Path, id: &str, doc: Value) -> Result<NoteMeta, String> {
         },
         empty_doc(),
         vec![],
+        false,
     ));
 
-    let title = derive_title(&doc);
+    // 用户手动改过标题就不再自动推导，否则每次保存都会把名字冲掉
+    let title = if locked {
+        meta.title.clone()
+    } else {
+        derive_title(&doc)
+    };
     let now = now_ms();
     let payload = json!({
         "version": 1,
         "id": id,
         "title": title,
+        "titleLocked": locked,
         "createdAt": meta.created_at,
         "updatedAt": now,
         "doc": doc,
         "pending": pending,   // 为"关闭即销毁 WebView"预留
     });
     let bytes = serde_json::to_vec(&payload).map_err(|e| e.to_string())?;
-    atomic_write(&path, &bytes, Some(&dir.join("notes").join(format!("{id}.json.bak"))))?;
+    atomic_write(
+        &path,
+        &bytes,
+        Some(&dir.join("notes").join(format!("{id}.json.bak"))),
+    )?;
     Ok(NoteMeta {
         id,
         title,
         created_at: meta.created_at,
         updated_at: now,
     })
+}
+
+/// 手动重命名。标题一旦手动改过就锁定，后续保存不再按正文覆盖。
+pub fn rename(dir: &Path, id: &str, title: &str) -> Result<NoteMeta, String> {
+    let id = safe_id(id)
+        .ok_or_else(|| "非法的笔记 id".to_string())?
+        .to_string();
+    let path = note_path(dir, &id);
+    let (meta, doc, pending, _) = read_note(&path).ok_or_else(|| "笔记不存在".to_string())?;
+
+    let trimmed = title.trim();
+    let title = if trimmed.is_empty() {
+        meta.title.clone()
+    } else {
+        trimmed.chars().take(80).collect::<String>()
+    };
+
+    let payload = json!({
+        "version": 1,
+        "id": id,
+        "title": title,
+        "titleLocked": true,
+        "createdAt": meta.created_at,
+        "updatedAt": meta.updated_at,   // 改名不是编辑，不改变排序
+        "doc": doc,
+        "pending": pending,
+    });
+    let bytes = serde_json::to_vec(&payload).map_err(|e| e.to_string())?;
+    atomic_write(&path, &bytes, None)?;
+    Ok(NoteMeta {
+        id,
+        title,
+        created_at: meta.created_at,
+        updated_at: meta.updated_at,
+    })
+}
+
+/// 软删除：移到 notes/.trash/，不做真删（这里记的都是随手抄的东西，误删没法恢复）。
+pub fn delete(dir: &Path, id: &str) -> Result<(), String> {
+    let id = safe_id(id).ok_or_else(|| "非法的笔记 id".to_string())?;
+    let path = note_path(dir, id);
+    if !path.exists() {
+        return Err("笔记不存在".into());
+    }
+    let trash = notes_dir(dir).join(".trash");
+    fs::create_dir_all(&trash).map_err(|e| format!("建回收目录失败: {e}"))?;
+    let target = trash.join(format!("{}-{}.json", id, now_ms()));
+    fs::rename(&path, &target).map_err(|e| format!("移入回收目录失败: {e}"))?;
+    let _ = fs::remove_file(dir.join("notes").join(format!("{id}.json.bak")));
+    Ok(())
 }
 
 /// 标题取文档里第一段非空文字，截 40 字；纯图片笔记给个占位名。
@@ -317,4 +388,103 @@ pub fn save_image(dir: &Path, bytes: &[u8]) -> Result<(String, String, u32, u32)
     }
     let rel = format!("images/{}/{}/{}.png", &hash[0..2], &hash[2..4], hash);
     Ok((rel, hash, w, h))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmpdir() -> PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static SEQ: AtomicU32 = AtomicU32::new(0);
+        // 测试是并发跑的，目录名必须唯一，否则会互相 remove_dir_all
+        let p = std::env::temp_dir().join(format!(
+            "c2g-test-{}-{}-{}",
+            std::process::id(),
+            now_ms(),
+            SEQ.fetch_add(1, Ordering::SeqCst)
+        ));
+        fs::create_dir_all(&p).unwrap();
+        ensure_dirs(&p);
+        p
+    }
+
+    fn doc_with(text: &str) -> Value {
+        json!({
+            "type": "doc",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": text }] }]
+        })
+    }
+
+    #[test]
+    fn 标题按正文推导() {
+        let d = tmpdir();
+        let n = create(&d, "无标题笔记").unwrap();
+        let meta = save(&d, &n.id, doc_with("正文第一句")).unwrap();
+        assert_eq!(meta.title, "正文第一句");
+        fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn 手动改名后锁定_保存不再覆盖() {
+        let d = tmpdir();
+        let n = create(&d, "无标题笔记").unwrap();
+        save(&d, &n.id, doc_with("原文")).unwrap();
+
+        let meta = rename(&d, &n.id, "我起的名字").unwrap();
+        assert_eq!(meta.title, "我起的名字");
+
+        // 之后再保存正文，标题必须保住
+        let meta = save(&d, &n.id, doc_with("完全不同的正文")).unwrap();
+        assert_eq!(meta.title, "我起的名字");
+        assert_eq!(load(&d, &n.id).unwrap().title, "我起的名字");
+
+        // 而且改名不该改变排序用的 updatedAt
+        assert_eq!(meta.updated_at, load(&d, &n.id).unwrap().updated_at);
+        fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn 删除是移入回收目录而不是真删() {
+        let d = tmpdir();
+        let n = create(&d, "要删掉的").unwrap();
+        assert_eq!(list(&d).len(), 1);
+
+        delete(&d, &n.id).unwrap();
+
+        assert_eq!(list(&d).len(), 0, "列表里不该再有它");
+        assert!(load(&d, &n.id).is_err(), "不该还能打开");
+        let trash = d.join("notes").join(".trash");
+        assert!(trash.exists(), "回收目录应该被建出来");
+        assert_eq!(
+            fs::read_dir(&trash).unwrap().count(),
+            1,
+            "文件应该躺在回收目录里"
+        );
+        fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn 列表按最近更新倒序() {
+        let d = tmpdir();
+        let a = create(&d, "A").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let b = create(&d, "B").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        save(&d, &a.id, doc_with("改过 A")).unwrap();
+
+        let l = list(&d);
+        assert_eq!(l[0].id, a.id, "刚编辑过的排最前");
+        assert_eq!(l[1].id, b.id);
+        fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn 拒绝路径穿越的_id() {
+        let d = tmpdir();
+        assert!(load(&d, "../settings").is_err());
+        assert!(load(&d, "..\\evil").is_err());
+        assert!(delete(&d, "../../x").is_err());
+        fs::remove_dir_all(&d).ok();
+    }
 }

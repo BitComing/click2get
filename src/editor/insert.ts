@@ -59,15 +59,3 @@ export function appendCapture(editor: Editor, cap: Capture) {
   const at = editor.state.doc.content.size
   editor.chain().insertContentAt(at, buildNode(cap)).run()
 }
-
-/** 一条系统提示（如监控恢复），复用 captureBlock 的卡片样式。 */
-export function appendNotice(editor: Editor, text: string) {
-  editor
-    .chain()
-    .insertContentAt(editor.state.doc.content.size, {
-      type: 'captureBlock',
-      attrs: { ts: Date.now(), notice: true },
-      content: [{ type: 'paragraph', content: [{ type: 'text', text }] }],
-    })
-    .run()
-}

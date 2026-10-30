@@ -14,8 +14,8 @@ use windows::Win32::System::Memory::{
     GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DispatchMessageW, GetMessageW, TranslateMessage, HWND_MESSAGE, MSG,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLIPBOARDUPDATE,
+    CreateWindowExW, DispatchMessageW, GetForegroundWindow, GetMessageW, GetWindowThreadProcessId,
+    TranslateMessage, HWND_MESSAGE, MSG, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLIPBOARDUPDATE,
 };
 
 use crate::{storage, AppState, Capture};
@@ -101,7 +101,13 @@ unsafe fn handle_update(app: &AppHandle) {
         return;
     }
 
-    // ② 排除格式（不打开剪贴板即可检测）
+    // ② 在我们自己的窗口里复制的东西不记录。
+    //    这条比"写剪贴板时打标记"更保险：Ctrl+C、右键复制、将来任何复制入口都覆盖到。
+    if own_window_is_foreground() {
+        return;
+    }
+
+    // ③ 排除格式（不打开剪贴板即可检测）
     if has_format(exclude_format()) {
         return;
     }
@@ -109,7 +115,7 @@ unsafe fn handle_update(app: &AppHandle) {
         return;
     }
 
-    // ③ 打开剪贴板（退避重试：对方程序可能正持有）
+    // ④ 打开剪贴板（退避重试：对方程序可能正持有）
     let mut opened = false;
     for _ in 0..4 {
         if OpenClipboard(None).is_ok() {
@@ -225,6 +231,19 @@ unsafe fn read_image(state: &AppState) -> Option<Capture> {
         h: Some(h),
         truncated: false,
     })
+}
+
+/// 前台窗口是不是我们自己的进程（= 用户在笔记软件里复制的）。
+fn own_window_is_foreground() -> bool {
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.is_invalid() {
+            return false;
+        }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        pid != 0 && pid == std::process::id()
+    }
 }
 
 /// 同一条内容在 1.5 秒内重复触发（Windows 有时连发两次 WM_CLIPBOARDUPDATE）就跳过。

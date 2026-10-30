@@ -96,6 +96,25 @@ fn save_note(
 }
 
 #[tauri::command]
+fn rename_note(
+    state: State<AppState>,
+    id: String,
+    title: String,
+) -> Result<storage::NoteMeta, String> {
+    storage::rename(&state.data_dir, &id, &title)
+}
+
+#[tauri::command]
+fn delete_note(app: AppHandle, state: State<AppState>, id: String) -> Result<(), String> {
+    storage::delete(&state.data_dir, &id)?;
+    let was_current = state.settings.lock().unwrap().last_note_id.as_deref() == Some(id.as_str());
+    if was_current {
+        update_settings(&app, |s| s.last_note_id = None);
+    }
+    Ok(())
+}
+
+#[tauri::command]
 fn set_monitoring(app: AppHandle, state: State<AppState>, on: bool) -> bool {
     state.monitoring.store(on, Ordering::SeqCst);
     update_settings(&app, |s| s.monitoring = on);
@@ -199,6 +218,8 @@ pub fn run() {
             create_note,
             load_note,
             save_note,
+            rename_note,
+            delete_note,
             set_monitoring,
             set_theme,
             set_sidebar,

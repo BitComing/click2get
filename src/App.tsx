@@ -4,7 +4,7 @@ import StarterKit from '@tiptap/starter-kit'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { CaptureBlock, CaptureImage, setDataDir } from './editor/extensions'
-import { appendCapture, appendNotice, type Capture } from './editor/insert'
+import { appendCapture, type Capture } from './editor/insert'
 
 type Theme = 'light' | 'dark'
 type NoteMeta = { id: string; title: string; createdAt: number; updatedAt: number }
@@ -54,6 +54,9 @@ function Workspace({ boot }: { boot: Bootstrap }) {
   const [currentId, setCurrentId] = useState<string | null>(null)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(boot.settings.sidebarCollapsed)
   const [menuOpen, setMenuOpen] = useState(false)
+  const [renaming, setRenaming] = useState<NoteMeta | null>(null)
+  const [renameDraft, setRenameDraft] = useState('')
+  const [confirmDelete, setConfirmDelete] = useState<NoteMeta | null>(null)
   const [toast, setToast] = useState<{ id: number; text: string } | null>(null)
   const [newCount, setNewCount] = useState(0)
   const [docEmpty, setDocEmpty] = useState(true)
@@ -193,13 +196,9 @@ function Workspace({ boot }: { boot: Bootstrap }) {
     }
   }, [editor, nearBottom, scrollToBottom, showToast])
 
-  // 托盘切换监控
+  // 托盘切换监控：只同步状态，不往笔记里插任何提示
   useEffect(() => {
-    const un = listen<boolean>('monitor-changed', (e) => {
-      const on = e.payload
-      setMonitoring(on)
-      if (on && editorRef.current) appendNotice(editorRef.current, '监控已恢复')
-    })
+    const un = listen<boolean>('monitor-changed', (e) => setMonitoring(e.payload))
     return () => {
       un.then((f) => f())
     }
@@ -253,7 +252,61 @@ function Workspace({ boot }: { boot: Bootstrap }) {
   const toggleMonitoring = async () => {
     const next = await invoke<boolean>('set_monitoring', { on: !monitoring })
     setMonitoring(next)
-    if (next && editor) appendNotice(editor, '监控已恢复')
+  }
+
+  const startRename = (n: NoteMeta) => {
+    setRenaming(n)
+    setRenameDraft(n.title)
+  }
+
+  const commitRename = async () => {
+    const target = renaming
+    setRenaming(null)
+    if (!target) return
+    const t = renameDraft.trim()
+    if (!t || t === target.title) return
+    try {
+      const meta = await invoke<NoteMeta>('rename_note', { id: target.id, title: t })
+      setNotes((prev) => upsert(prev, meta))
+    } catch {
+      showToast('重命名失败')
+    }
+  }
+
+  const doDelete = async () => {
+    const target = confirmDelete
+    setConfirmDelete(null)
+    if (!target) return
+    try {
+      await invoke('delete_note', { id: target.id })
+    } catch {
+      showToast('删除失败')
+      return
+    }
+    const rest = notes.filter((n) => n.id !== target.id)
+    setNotes(rest)
+    if (currentIdRef.current !== target.id) return
+
+    // 删的是当前打开的这篇：切到下一篇；没有就新建一篇，别留空壳
+    if (rest.length) {
+      const full = await invoke<NoteFull>('load_note', { id: rest[0].id })
+      setCurrentId(full.id)
+      currentIdRef.current = full.id
+      loadingRef.current = true
+      editorRef.current?.commands.setContent(full.doc ?? EMPTY_DOC, { emitUpdate: false })
+      loadingRef.current = false
+      setDocEmpty(editorRef.current?.isEmpty ?? true)
+    } else {
+      const created = await invoke<NoteFull>('create_note')
+      setNotes([created])
+      setCurrentId(created.id)
+      currentIdRef.current = created.id
+      loadingRef.current = true
+      editorRef.current?.commands.setContent(created.doc ?? EMPTY_DOC, { emitUpdate: false })
+      loadingRef.current = false
+      setDocEmpty(true)
+    }
+    setNewCount(0)
   }
 
   const toggleTheme = async () => {
@@ -306,9 +359,38 @@ function Workspace({ boot }: { boot: Bootstrap }) {
                 key={n.id}
                 className={`item ${n.id === currentId ? 'active' : ''}`}
                 onClick={() => switchNote(n.id)}
+                onDoubleClick={() => startRename(n)}
                 title={n.title}
               >
-                {n.title}
+                {renaming?.id === n.id ? (
+                  <span className="item-title renaming-hint">{renameDraft || n.title}</span>
+                ) : (
+                  <>
+                    <span className="item-title">{n.title}</span>
+                    <span className="item-actions">
+                      <button
+                        className="mini"
+                        title="重命名"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          startRename(n)
+                        }}
+                      >
+                        <PencilIcon />
+                      </button>
+                      <button
+                        className="mini"
+                        title="删除"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          setConfirmDelete(n)
+                        }}
+                      >
+                        <TrashIcon />
+                      </button>
+                    </span>
+                  </>
+                )}
               </div>
             ))}
             {notes.length === 0 && <div className="empty">还没有笔记</div>}
@@ -401,6 +483,65 @@ function Workspace({ boot }: { boot: Bootstrap }) {
             {toast.text}
           </div>
         )}
+
+        {confirmDelete && (
+          <div className="modal-backdrop" onClick={() => setConfirmDelete(null)}>
+            <div className="modal" onClick={(e) => e.stopPropagation()}>
+              <div className="modal-title">删除这篇笔记？</div>
+              <div className="modal-body">
+                「{confirmDelete.title}」
+                <br />
+                会移到 <code>notes/.trash</code>，不会立刻消失。
+              </div>
+              <div className="modal-actions">
+                <button className="btn" onClick={() => setConfirmDelete(null)}>
+                  取消
+                </button>
+                <button className="btn danger" onClick={doDelete}>
+                  删除
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {renaming && (
+          <div className="modal-backdrop" onClick={() => setRenaming(null)}>
+            <div className="modal" onClick={(e) => e.stopPropagation()}>
+              <div className="modal-title">重命名笔记</div>
+              <input
+                className="modal-input"
+                ref={(el) => {
+                  // 打开即聚焦并全选，直接敲键盘就是替换
+                  if (el) {
+                    el.focus()
+                    el.select()
+                  }
+                }}
+                value={renameDraft}
+                maxLength={80}
+                onChange={(e) => setRenameDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault()
+                    void commitRename()
+                  } else if (e.key === 'Escape') {
+                    e.preventDefault()
+                    setRenaming(null)
+                  }
+                }}
+              />
+              <div className="modal-actions">
+                <button className="btn" onClick={() => setRenaming(null)}>
+                  取消
+                </button>
+                <button className="btn primary" onClick={commitRename}>
+                  确定
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </main>
     </div>
   )
@@ -430,6 +571,22 @@ function MoreIcon() {
       <circle cx="5.6" cy="12" r="1.7" />
       <circle cx="12" cy="12" r="1.7" />
       <circle cx="18.4" cy="12" r="1.7" />
+    </svg>
+  )
+}
+
+function PencilIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <path d="M4 20h4l10-10a2.5 2.5 0 0 0-3.5-3.5L4.5 16.5 4 20z" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+function TrashIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <path d="M4 7h16M9.5 7V5h5v2M6.5 7l.9 12.2A1.8 1.8 0 0 0 9.2 21h5.6a1.8 1.8 0 0 0 1.8-1.8L17.5 7" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   )
 }
