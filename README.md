@@ -42,12 +42,23 @@ cargo run
 > **注意**：Tauri 会把前端产物**编译进 exe**。只跑 `pnpm build` 不重编 Rust，
 > 界面改动不会出现——这是本项目最容易踩的坑。改前端后一律 `pnpm build && cargo build`。
 
-打包（需要先装 CLI：`cargo install tauri-cli --version 2.12.4`）：
+## 打包
+
+CLI 已作为 devDependency 锁定在 `@tauri-apps/cli@2.12.4`（与 tauri 2.12.5 配套），无需再 `cargo install`。
 
 ```powershell
-cd src-tauri
-cargo tauri build
+pnpm dist             # = vite build && tauri build，一条命令出安装包
 ```
+
+产物（`src-tauri/target/release/`）：
+
+| 文件 | 说明 |
+|---|---|
+| `click2get.exe` | 单文件绿色版，3.65 MB，双击即用（依赖系统 WebView2） |
+| `bundle/nsis/Click2Get_0.1.0_x64-setup.exe` | NSIS 安装包，1.46 MB，装到 `%LOCALAPPDATA%\Click2Get`，免管理员 |
+| `bundle/Click2Get_0.1.0_x64_portable.zip` | 便携版压缩包，1.71 MB |
+
+首次打包会自动下载 NSIS（~1.5 MB）到 `%LOCALAPPDATA%\tauri`，之后离线可打。全量 release 编译约 3 分钟（`lto` + `opt-level=s`）。
 
 ## 数据
 

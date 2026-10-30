@@ -30,8 +30,16 @@
     }
   },
   "bundle": {
-    "active": false,
+    "active": true,
     "targets": "nsis",
-    "icon": ["icons/icon.ico"]
+    "icon": ["icons/icon.ico"],
+    "shortDescription": "剪贴板捕获式笔记工具",
+    "longDescription": "开着监控，任何地方复制的文字/图片都会自动追加到当前笔记。",
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": ["SimpChinese", "English"]
+      }
+    }
   }
 }
