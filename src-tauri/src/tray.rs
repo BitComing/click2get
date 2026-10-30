@@ -62,7 +62,7 @@ fn toggle(app: &AppHandle) {
     let state = app.state::<AppState>();
     let next = !state.monitoring.load(Ordering::SeqCst);
     state.monitoring.store(next, Ordering::SeqCst);
-    crate::settings::save(&state.data_dir, next);
+    crate::update_settings(app, |s| s.monitoring = next);
     let _ = app.emit("monitor-changed", next);
     refresh(app, next);
 }

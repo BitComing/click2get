@@ -10,8 +10,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
+
+use settings::Settings;
+use storage::NoteFull;
 
 /// 一次捕获事件。前端拿它拼成 captureBlock 节点。
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -31,44 +33,97 @@ pub struct Capture {
 }
 
 pub struct AppState {
+    /// 给剪贴板线程快速读的开关（与 settings.monitoring 保持同步）
     pub monitoring: AtomicBool,
     pub data_dir: PathBuf,
+    /// 完整设置的唯一来源（监控开关 / 主题 / 上次打开的笔记）
+    pub settings: Mutex<Settings>,
     /// 上一条捕获的 (内容 hash, 时间戳)，用于压掉同一次复制产生的重复通知
     pub last_seen: Mutex<(String, i64)>,
+}
+
+/// 改设置 → 落盘 → 返回快照。
+pub fn update_settings<F: FnOnce(&mut Settings)>(app: &AppHandle, f: F) -> Settings {
+    let state = app.state::<AppState>();
+    let snapshot = {
+        let mut s = state.settings.lock().unwrap();
+        f(&mut s);
+        s.clone()
+    };
+    settings::save(&state.data_dir, &snapshot);
+    snapshot
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Bootstrap {
-    doc: serde_json::Value,
-    pending: Vec<serde_json::Value>,
-    monitoring: bool,
+    notes: Vec<storage::NoteMeta>,
+    settings: Settings,
     data_dir: String,
 }
 
 #[tauri::command]
 fn bootstrap(state: State<AppState>) -> Bootstrap {
-    let (doc, pending) = storage::load(&state.data_dir);
     Bootstrap {
-        doc,
-        pending,
-        monitoring: state.monitoring.load(Ordering::SeqCst),
+        notes: storage::list(&state.data_dir),
+        settings: state.settings.lock().unwrap().clone(),
         data_dir: state.data_dir.to_string_lossy().to_string(),
     }
 }
 
 #[tauri::command]
-fn save_note(state: State<AppState>, doc: serde_json::Value) -> Result<(), String> {
-    storage::save_doc(&state.data_dir, doc)
+fn create_note(app: AppHandle, state: State<AppState>) -> Result<NoteFull, String> {
+    let note = storage::create(&state.data_dir, "无标题笔记")?;
+    // 新建即成为"上次打开的笔记"，重启后回到这篇
+    update_settings(&app, |s| s.last_note_id = Some(note.id.clone()));
+    Ok(note)
+}
+
+#[tauri::command]
+fn load_note(app: AppHandle, state: State<AppState>, id: String) -> Result<NoteFull, String> {
+    let note = storage::load(&state.data_dir, &id)?;
+    update_settings(&app, |s| s.last_note_id = Some(note.id.clone()));
+    Ok(note)
+}
+
+#[tauri::command]
+fn save_note(
+    state: State<AppState>,
+    id: String,
+    doc: serde_json::Value,
+) -> Result<storage::NoteMeta, String> {
+    storage::save(&state.data_dir, &id, doc)
 }
 
 #[tauri::command]
 fn set_monitoring(app: AppHandle, state: State<AppState>, on: bool) -> bool {
     state.monitoring.store(on, Ordering::SeqCst);
-    settings::save(&state.data_dir, on);
+    update_settings(&app, |s| s.monitoring = on);
     tray::refresh(&app, on);
     let _ = app.emit("monitor-changed", on);
     on
+}
+
+#[tauri::command]
+fn set_theme(app: AppHandle, theme: String) -> String {
+    let t = if theme == "dark" { "dark" } else { "light" };
+    update_settings(&app, |s| s.theme = t.to_string());
+    t.to_string()
+}
+
+#[tauri::command]
+fn set_sidebar(app: AppHandle, collapsed: bool) -> bool {
+    update_settings(&app, |s| s.sidebar_collapsed = collapsed);
+    collapsed
+}
+
+#[tauri::command]
+fn open_data_dir(state: State<AppState>) -> Result<(), String> {
+    std::process::Command::new("explorer")
+        .arg(&state.data_dir)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("打开文件夹失败: {e}"))
 }
 
 /// 应用内"复制"必须走这里：同时写入 Click2GetOwned 标记格式，
@@ -100,6 +155,12 @@ fn save_image_b64(state: State<AppState>, b64: String) -> Result<Capture, String
 #[tauri::command]
 fn quit_app(app: AppHandle) {
     app.exit(0);
+}
+
+/// 菜单里的"退出"：先让前端落盘，再退出。
+#[tauri::command]
+fn quit_gracefully(app: AppHandle) {
+    request_quit(&app);
 }
 
 #[tauri::command]
@@ -135,11 +196,17 @@ pub fn run() {
         }))
         .invoke_handler(tauri::generate_handler![
             bootstrap,
+            create_note,
+            load_note,
             save_note,
             set_monitoring,
+            set_theme,
+            set_sidebar,
+            open_data_dir,
             copy_with_marker,
             save_image_b64,
             quit_app,
+            quit_gracefully,
             hide_window
         ])
         .setup(|app| {
@@ -149,12 +216,14 @@ pub fn run() {
                 .expect("取不到 app_local_data_dir");
             std::fs::create_dir_all(&data_dir)?;
             storage::ensure_dirs(&data_dir);
+            storage::migrate_legacy(&data_dir);
 
-            let monitoring = settings::load(&data_dir);
+            let s = settings::load(&data_dir);
 
             app.manage(AppState {
-                monitoring: AtomicBool::new(monitoring),
+                monitoring: AtomicBool::new(s.monitoring),
                 data_dir: data_dir.clone(),
+                settings: Mutex::new(s.clone()),
                 last_seen: Mutex::new((String::new(), 0)),
             });
 
@@ -170,12 +239,9 @@ pub fn run() {
             }
 
             tray::build(app.handle())?;
-            tray::refresh(app.handle(), monitoring);
+            tray::refresh(app.handle(), s.monitoring);
 
             clipboard::spawn(app.handle().clone());
-
-            // 让前端知道当前数据目录（拼图片 URL 用）
-            let _ = app.handle().emit("rust-ready", json!({}));
             Ok(())
         })
         .run(tauri::generate_context!())

@@ -4,7 +4,8 @@ Add-Type -AssemblyName System.Drawing
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
-public class W4 {
+public class W5 {
+  [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int c);
   [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
@@ -14,32 +15,34 @@ public class W4 {
 }
 "@
 
+# 必须先声明 DPI 感知，否则 GetWindowRect 返回的是被虚拟化的逻辑坐标，
+# 截出来的图会比实际渲染小一圈，右侧和底部被裁掉。
+[W5]::SetProcessDPIAware() | Out-Null
+
 $p = Get-Process click2get -ErrorAction SilentlyContinue |
      Where-Object { $_.MainWindowHandle -ne [IntPtr]::Zero } |
      Select-Object -First 1
 if (-not $p) { Write-Output "no main window"; exit 1 }
 $h = $p.MainWindowHandle
 
-if ($Hide) { [W4]::ShowWindow($h, 0) | Out-Null; Write-Output "hidden"; exit 0 }
+if ($Hide) { [W5]::ShowWindow($h, 0) | Out-Null; Write-Output "hidden"; exit 0 }
 
-if ([W4]::IsIconic($h)) { [W4]::ShowWindow($h, 9) | Out-Null }
-# 提到最前（SWP_NOSIZE|SWP_NOMOVE|SWP_SHOWWINDOW）
-[W4]::SetWindowPos($h, [IntPtr](-1), 0, 0, 0, 0, 0x0001 -bor 0x0002 -bor 0x0040) | Out-Null
+if ([W5]::IsIconic($h)) { [W5]::ShowWindow($h, 9) | Out-Null }
+[W5]::SetWindowPos($h, [IntPtr](-1), 0, 0, 0, 0, 0x0001 -bor 0x0002 -bor 0x0040) | Out-Null
 Start-Sleep -Milliseconds 900
 
-$r = New-Object W4+RECT
-[W4]::GetWindowRect($h, [ref]$r) | Out-Null
+$r = New-Object W5+RECT
+[W5]::GetWindowRect($h, [ref]$r) | Out-Null
 $w = $r.Right - $r.Left
 $hh = $r.Bottom - $r.Top
 $bmp = New-Object System.Drawing.Bitmap $w, $hh
 $g = [System.Drawing.Graphics]::FromImage($bmp)
 $hdc = $g.GetHdc()
-$ok = [W4]::PrintWindow($h, $hdc, 2)   # PW_RENDERFULLCONTENT
+$ok = [W5]::PrintWindow($h, $hdc, 2)
 $g.ReleaseHdc($hdc)
 $g.Dispose()
 $bmp.Save($Out, [System.Drawing.Imaging.ImageFormat]::Png)
 $bmp.Dispose()
 Write-Output "saved $Out ${w}x${hh} printwindow=$ok"
 
-# 还原窗口层级，别一直置顶
-[W4]::SetWindowPos($h, [IntPtr](-2), 0, 0, 0, 0, 0x0001 -bor 0x0002) | Out-Null
+[W5]::SetWindowPos($h, [IntPtr](-2), 0, 0, 0, 0, 0x0001 -bor 0x0002) | Out-Null

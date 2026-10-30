@@ -11,13 +11,13 @@
       {
         "label": "main",
         "title": "Click2Get",
-        "width": 900,
+        "width": 1020,
         "height": 720,
-        "minWidth": 460,
-        "minHeight": 380,
+        "minWidth": 620,
+        "minHeight": 420,
         "resizable": true,
         "visible": true,
-        "backgroundColor": "#0E0E10",
+        "backgroundColor": "#F6F6F8",
         "additionalBrowserArgs": "--disable-gpu --disable-background-networking --disable-component-update --disable-sync --js-flags=--max-old-space-size=192"
       }
     ],

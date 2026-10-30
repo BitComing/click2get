@@ -21,12 +21,16 @@
 | F6 | 托盘常驻 | 关窗口 = 隐藏；托盘菜单：打开 / 暂停·恢复 / 退出 |
 | F7 | 单实例 | 二次启动唤醒已有实例，不起第二个进程 |
 | F8 | 隐私底线 | 密码管理器标记的内容不记录；应用内复制不自我捕获 |
+| F9 | 多笔记 | 左栏列表按最近更新排序；「新建笔记」即时创建并切过去；重启回到上次那篇 |
+| F10 | 主题 | **默认浅色**，标题栏一键切深色；选择持久化 |
+| F11 | 侧栏折叠 | 标题栏 ☰ 收起/展开，状态持久化；收起时编辑区居中占满 |
+| F12 | 存储位置可见 | 标题栏 ⋯ 菜单里显示数据目录、可打开/复制路径 |
 
 ### 1.2 明确不做（第一阶段）
 
-多笔记 · 归档 · 收藏 · 全文搜索 · 导出 Markdown/PDF · 缩略图管线 · 纹理 LRU ·
+归档 · 收藏 · 全文搜索 · 导出 Markdown/PDF · 缩略图管线 · 纹理 LRU ·
 内容寻址之外的图片优化 · 三态内存生命周期 · 骨架屏 · 动效规范 · CF_HTML 格式保留 ·
-块式虚拟滚动 · 全局热键 · 开机自启 · 多显示器 DPI 精细适配
+块式虚拟滚动 · 全局热键 · 开机自启 · 多显示器 DPI 精细适配 · 笔记删除/重命名/拖动排序
 
 > 这些不是"以后再说"的模糊清单，而是**已被决定推迟**的清单。任何一条在开发中被顺手加进来，
 > 都应在提交信息里写明理由。
@@ -66,49 +70,49 @@
 
 ```
 %LOCALAPPDATA%\com.click2get.app\
-  note.json          # 唯一数据源（TipTap JSON + pending）
-  note.json.bak      # 上一版，写坏时兜底
+  notes\<id>.json         # 一篇笔记一个文件（TipTap JSON + pending）
+  notes\<id>.json.bak     # 该篇的上一版，写坏时兜底
   images\ab\cd\<sha256>.png
+  settings.json           # 监控开关 / 主题 / 上次打开的笔记 / 侧栏折叠
+  note.json.migrated      # 老版本单篇存储，首次启动自动导入后改名留档
 ```
 
-`ab\cd` 是 sha256 前四位分两级目录，避免单目录堆几十万文件。
+- `ab\cd` 是 sha256 前四位分两级目录，避免单目录堆几十万文件。
+- **不维护索引文件**：笔记列表由扫描 `notes/*.json` 得到，避免"索引和真实文件不同步"这类
+  只能靠人肉修的历史包袱。几十篇的规模下扫描开销可以忽略。
 
-### 3.2 note.json
+### 3.2 notes/<id>.json
 
 ```json
 {
   "version": 1,
-  "savedAt": 1761792000000,
-  "doc": {
-    "type": "doc",
-    "content": [
-      { "type": "captureBlock",
-        "attrs": { "ts": 1761792000000, "notice": false },
-        "content": [
-          { "type": "paragraph", "content": [ { "type": "text", "text": "被复制的正文…" } ] }
-        ]
-      }
-    ]
-  },
+  "id": "n1793329210080_6970",
+  "title": "被复制的正文…",
+  "createdAt": 1761792000000,
+  "updatedAt": 1761792000000,
+  "doc": { "type": "doc", "content": [ … ] },
   "pending": []
 }
 ```
 
 - `doc` 是前端编辑器的完整状态，**唯一内容源**。
+- `title` 由后端从文档第一段非空文字推导（截 40 字），前端不负责命名；
+  纯图片笔记会得到"无标题笔记"。
 - `pending` 本阶段恒为空数组，**为"关闭窗口即销毁 WebView"预留**（见 8.1）。
   现在只占一个字段，将来改造时不必迁移存量数据。
+- 文件 id 只允许 `[A-Za-z0-9_-]`，挡住 `../..` 这类路径穿越。
 
 ### 3.3 写入规则
 
 ```
-写 -> note.json.tmp -> sync_all() -> 复制旧版为 .bak -> rename(tmp, note.json)
+写 -> <id>.json.tmp -> sync_all() -> 复制旧版为 <id>.json.bak -> rename(tmp, <id>.json)
 ```
 
 `std::fs::rename` 在 Windows 上映射到 `MoveFileExW(MOVEFILE_REPLACE_EXISTING)`，
-可原地替换。顺序很重要：**先 sync 再 rename**，否则断电可能留下零字节的 note.json。
+可原地替换。顺序很重要：**先 sync 再 rename**，否则断电可能留下零字节的文件。
 
-启动时：`note.json` 解析失败 → 尝试 `.bak` → 仍失败则把两份都改名保存为
-`note.corrupt-<ts>.json` 并开一篇空文档（**绝不静默覆盖**）。
+单篇文件解析失败时该篇直接退回 `pending` 空、`doc` 空（不阻塞其它笔记）；
+老的单篇 `note.json` 会在首次启动时导入成第一篇笔记，成功后改名 `note.json.migrated`。
 
 ### 3.4 图片
 
