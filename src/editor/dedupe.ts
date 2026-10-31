@@ -4,7 +4,7 @@ import type { Node as PMNode } from '@tiptap/pm/model'
  * 捕获去重：同样的东西**在进入笔记之前**就拦住，而不是记完再删。
  *
  * 判据只有两条，都好解释：
- * - 文字：把内容按行拆开（每行去掉首尾空白、去掉首尾空行）后，和笔记里某个捕获块的
+ * - 文字：把内容按行拆开（每行去掉首尾空白、空行不留）后，和笔记里某个捕获块的
  *   逐行内容完全相同，就算重复。只比"整块"，不做子串匹配 —— 否则笔记里有一句
  *   "好的，我马上处理"，用户复制一个"好的"也会被吞掉。
  * - 图片：按内容 hash 比。图片文件本来就是内容寻址的，同一个 hash 就是同一张图。
@@ -21,15 +21,20 @@ export type DupHit = {
   rows: number
 }
 
-/** 按行规整：统一换行符、每行去首尾空白、去掉首尾空行。 */
+/**
+ * 按行规整：统一换行符、每行去首尾空白、**空行一律不留**。
+ *
+ * 空行必须和插入端（insert.buildTextParagraphs）用同一套规则：那边是"整行空白直接跳过"，
+ * 所以 `a\n\nb` 落到笔记里就是两段 `a` / `b`。以前这里只裁首尾空行，中间那个空行留着，
+ * 于是同一段带空行的内容再复制一次永远比不上 —— 去重对带空行的段落等于没开。见 issue #5。
+ */
 export function normalizeCaptureText(text: string): string {
-  const lines = text
+  return text
     .replace(/\r\n?/g, '\n')
     .split('\n')
     .map((l) => l.trim())
-  while (lines.length > 0 && lines[0] === '') lines.shift()
-  while (lines.length > 0 && lines[lines.length - 1] === '') lines.pop()
-  return lines.join('\n')
+    .filter((l) => l !== '')
+    .join('\n')
 }
 
 export type CaptureLike = {

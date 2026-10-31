@@ -67,7 +67,8 @@ check('空文本不判重', hit('text', '   \n  '), 'null')
 check('硬换行的多行照旧算同一段', hit('text', '硬换行第一行\n硬换行第二行'), 'text:2')
 check('硬换行里的单行不算重复', hit('text', '硬换行第一行'), 'null')
 
-check('规整函数保留内部空行', normalizeCaptureText('a\n\nb\n'), 'a\n\nb')
+check('带中间空行的内容再复制一次也算重复', hit('text', '第一行\n\n第二行'), 'text:2')
+check('规整函数不留空行（和插入端的规则一致）', normalizeCaptureText('a\n\nb\n'), 'a\nb')
 
 console.log(failed === 0 ? '\n全部通过' : `\n失败 ${failed} 个`)
 process.exit(failed === 0 ? 0 : 1)
