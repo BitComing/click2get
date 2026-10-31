@@ -79,6 +79,13 @@ node --experimental-strip-types docs\test-insert.ts
 node --experimental-strip-types docs\test-copy-text.ts
 ```
 
+打开笔记时的规整也有一条，重点是**幂等**（跑一遍和跑十遍结果必须一样）——
+否则"打开一次多一层段落"这种问题会随着每次打开悄悄累积：
+
+```powershell
+node --experimental-strip-types docs\test-normalize.ts
+```
+
 > **注意**：Tauri 会把前端产物**编译进 exe**。只跑 `pnpm build` 不重编 Rust，
 > 界面改动不会出现——这是本项目最容易踩的坑。改前端后一律 `pnpm build && cargo build`。
 
@@ -137,7 +144,7 @@ pnpm dist             # = vite build && tauri build，一条命令出安装包
 | [`src/editor/extensions.ts`](src/editor/extensions.ts) | `captureBlock` 节点（空块自动清理）、图片节点（相对路径 → asset URL、只下发 width；备注不在这里）、`TrailingLine`（只在图收尾时补一行） |
 | [`src/editor/lineOps.ts`](src/editor/lineOps.ts) | 行级编辑：Enter 就地拆行、Backspace/Delete 一次并一行（跨捕获块也行）、Ctrl+A 先选这一行再全选，纯函数（`docs/test-line-ops.ts` 覆盖） |
 | [`src/editor/lineBreaks.ts`](src/editor/lineBreaks.ts) | 行内换行 ↔ 单独的行：右键「拆解成多行 / 合并多行」的文档变换（纯函数，`docs/test-row-ops.ts` 覆盖） |
-| [`src/editor/normalize.ts`](src/editor/normalize.ts) | 打开笔记时把旧数据里被 lift 到块外的段落收回捕获块（纯函数） |
+| [`src/editor/normalize.ts`](src/editor/normalize.ts) | 打开笔记时规整文档：把旧数据里被 lift 到块外的段落收回捕获块、块级图片包一层段落（段落里的行内图**不动**）；纯函数，必须幂等 |
 | [`src/editor/search.ts`](src/editor/search.ts) | 搜索结果在编辑器里定位：正文选词 / 按 hash 选中图片、滚过去 |
 | [`src/editor/dragMove.ts`](src/editor/dragMove.ts) | 长按拖动（图 / 整行 / 选中的几行）：指针接管、ghost、落点指示线、原位置灰线、拖进侧栏笔记 / 新建笔记 / 垃圾图标、自动滚动 |
 | [`src/editor/dropLine.ts`](src/editor/dropLine.ts) | 落点线画在哪条缝里：只看插入位置（上下邻居的中点），一条缝只有一个提示（纯函数，`docs/test-drop-line.ts` 覆盖） |

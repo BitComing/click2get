@@ -22,6 +22,8 @@ type Json = Record<string, any>
 const isParagraph = (n: Json | undefined) => n?.type === 'paragraph'
 const isEmptyParagraph = (n: Json | undefined) => isParagraph(n) && !(n?.content?.length)
 const isImage = (n: Json | undefined) => n?.type === 'image'
+/** 文字块（段落 / 标题）：内容模型是 `inline*`，图片在这里是**行内节点**。 */
+const isTextblock = (n: Json | undefined) => n?.type === 'paragraph' || n?.type === 'heading'
 
 function copy(n: Json): Json {
   const out: Json = { ...n }
@@ -30,12 +32,22 @@ function copy(n: Json): Json {
   return out
 }
 
-/** 块级图片 → 段落里的一张图（行内）。段落里的图原样保留。 */
+/**
+ * 块级图片 → 段落里的一张图（行内）。
+ *
+ * **只看"图片的直接父节点是不是文字块"**：图片挂在 `doc` / `captureBlock` 下面时
+ * 它自己是一个块，得补一层段落；已经躺在段落 / 标题里的那张图本来就是行内节点，
+ * 再包一层就成了 `paragraph > paragraph > image` ——
+ * 段落的内容模型是 `inline*`，这个结构不合法，而且行级编辑靠 depth 判断
+ * （lineOps 里 `$head.depth > 2` 就交回默认逻辑），套深一层会把这些块里的
+ * Enter / Backspace 全部打回旧行为。见 issue #1。
+ */
 function wrapImages(node: Json): Json {
   const out = copy(node)
   if (!Array.isArray(out.content)) return out
+  const inline = isTextblock(out)
   out.content = out.content.map((child: Json) =>
-    isImage(child) ? { type: 'paragraph', content: [child] } : wrapImages(child),
+    isImage(child) && !inline ? { type: 'paragraph', content: [child] } : wrapImages(child),
   )
   return out
 }
