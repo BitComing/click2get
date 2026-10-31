@@ -543,6 +543,9 @@ pub fn run() {
                 .expect("取不到 app_local_data_dir");
             std::fs::create_dir_all(&data_dir)?;
             storage::ensure_dirs(&data_dir);
+            // 应用标识从 com.click2get.uitest 改回来过：那段时间的笔记还在旧目录里，
+            // 先搬一次（只在当前目录一篇笔记都没有时才动手，见 storage::migrate_previous_app_dir）
+            storage::migrate_previous_app_dir(&data_dir);
             storage::migrate_legacy(&data_dir);
             // 图片备注从"笔记节点上的 attrs.note"搬到图片自己的 sidecar
             storage::migrate_image_notes(&data_dir);

@@ -19,6 +19,10 @@ desktop.ini
 # 调试时随手截的图 / 探针脚本（docs/_xxx.png、_probe.ps1…）
 docs/_*
 
+# 改 tauri.conf.json 做 UI 测试时留下的原文件副本（别提交，见 issue #2）
+src-tauri/tauri.conf.json.orig
+src-tauri/tauri.conf.json.bak
+
 # 临时文件（note.json 的原子写中间态）
 *.tmp
 note.json

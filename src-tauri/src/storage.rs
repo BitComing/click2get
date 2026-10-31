@@ -119,8 +119,7 @@ pub fn empty_doc() -> Value {
 }
 
 fn read_note(path: &Path) -> Option<(NoteMeta, Value, Vec<Value>, bool)> {
-    let raw = fs::read_to_string(path).ok()?;
-    let v: Value = serde_json::from_str(&raw).ok()?;
+    let v = read_json(path)?;
     let id = v.get("id")?.as_str()?.to_string();
     let title = v
         .get("title")
@@ -164,8 +163,32 @@ fn read_note(path: &Path) -> Option<(NoteMeta, Value, Vec<Value>, bool)> {
 /// 读一篇笔记的原始 JSON（正文 / 标题 / 附带字段都在里面）。
 pub(crate) fn read_note_file(dir: &Path, id: &str) -> Option<Value> {
     let id = safe_id(id)?;
-    let raw = fs::read_to_string(note_path(dir, id)).ok()?;
-    serde_json::from_str::<Value>(&raw).ok()
+    read_json(&note_path(dir, id))
+}
+
+/// 一份笔记的备份路径：`notes/n123.json` → `notes/n123.json.bak`。
+fn bak_path(path: &Path) -> PathBuf {
+    let mut s = path.as_os_str().to_owned();
+    s.push(".bak");
+    PathBuf::from(s)
+}
+
+/// 读笔记 JSON；主文件写坏 / 断电只写了一半时，退回上一版 `.bak`，并把主文件就地修好。
+///
+/// 以前 `.bak` 只写不读：主文件解析失败，这篇笔记就从列表里静默消失，
+/// 明明旁边躺着一份完好的备份（见 issue #3）。
+fn read_json(path: &Path) -> Option<Value> {
+    if let Ok(raw) = fs::read_to_string(path) {
+        if let Ok(v) = serde_json::from_str::<Value>(&raw) {
+            return Some(v);
+        }
+    }
+    let raw = fs::read_to_string(bak_path(path)).ok()?;
+    let v: Value = serde_json::from_str(&raw).ok()?;
+    // 用备份把主文件写回去，下一次打开就不用再走这条路。
+    // bak 传 None：这一刻主文件是坏的，绝不能拿它覆盖掉唯一那份好备份。
+    let _ = atomic_write(path, raw.as_bytes(), None);
+    Some(v)
 }
 
 /// 扫描 notes/ 得到列表（置顶最前，其余按最近更新倒序）。不维护索引文件，避免索引与真实文件不同步。
@@ -860,6 +883,60 @@ fn derive_title(doc: &Value) -> String {
     }
 }
 
+/// 以前用过的应用标识 —— `tauri.conf.json` 的 identifier 被改成 `uitest` 过一阵，
+/// 那段时间的笔记全都写在这个目录里（见 issue #2）。
+const PREVIOUS_APP_DIR: &str = "com.click2get.uitest";
+
+/// 把旧标识目录里的数据搬进当前数据目录（**复制，不移动**：旧目录留着当备份）。
+///
+/// 只在"当前目录一篇笔记都没有、旧目录里有"时动手。用户已经在用新版本了，
+/// 就一个字节都不碰 —— 免得把两批数据混在一起。
+pub fn migrate_previous_app_dir(dir: &Path) {
+    let Some(parent) = dir.parent() else { return };
+    let old = parent.join(PREVIOUS_APP_DIR);
+    if old == dir || !old.is_dir() {
+        return;
+    }
+    if has_any_note(dir) || !has_any_note(&old) {
+        return;
+    }
+    copy_missing(&old, dir);
+}
+
+/// 这个目录里有没有任何笔记文件（回收站里的不算）。
+fn has_any_note(dir: &Path) -> bool {
+    fs::read_dir(notes_dir(dir))
+        .map(|entries| {
+            entries.flatten().any(|e| {
+                e.path().extension().and_then(|x| x.to_str()) == Some("json")
+            })
+        })
+        .unwrap_or(false)
+}
+
+/// 递归复制"目的地还没有的文件"，已有的不覆盖。
+///
+/// WebView2 的用户数据目录（EBWebView）跳过：跟笔记无关，动辄几百 MB，
+/// 而且拷过来反而会让新实例用上旧实例的缓存。
+fn copy_missing(from: &Path, to: &Path) {
+    let Ok(entries) = fs::read_dir(from) else { return };
+    for e in entries.flatten() {
+        let src = e.path();
+        let Some(name) = src.file_name() else { continue };
+        if name.to_str() == Some("EBWebView") {
+            continue;
+        }
+        let dst = to.join(name);
+        if src.is_dir() {
+            if fs::create_dir_all(&dst).is_ok() {
+                copy_missing(&src, &dst);
+            }
+        } else if !dst.exists() {
+            let _ = fs::copy(&src, &dst);
+        }
+    }
+}
+
 /// 老版本单篇 note.json → 第一篇笔记（只跑一次，成功后把旧文件改名留档）。
 pub fn migrate_legacy(dir: &Path) {
     let legacy = dir.join("note.json");
@@ -1470,6 +1547,8 @@ mod tests {
     fn 删除是移入回收目录而不是真删() {
         let d = tmpdir();
         let n = create(&d, "要删掉的").unwrap();
+        // 有内容才会进回收站：空白笔记按设计是直接删文件（见下面那条用例）
+        save(&d, &n.id, doc_with("这句是要保住的")).unwrap();
         assert_eq!(list(&d).len(), 1);
 
         delete(&d, &n.id).unwrap();
@@ -1482,6 +1561,21 @@ mod tests {
             fs::read_dir(&trash).unwrap().count(),
             1,
             "文件应该躺在回收目录里"
+        );
+        fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn 空白笔记删除不留回收站() {
+        let d = tmpdir();
+        let n = create(&d, "新建了没写").unwrap();
+
+        delete(&d, &n.id).unwrap();
+
+        assert_eq!(list(&d).len(), 0);
+        assert!(
+            !d.join("notes").join(".trash").exists(),
+            "空白笔记是空壳，直接删文件，不该进回收站"
         );
         fs::remove_dir_all(&d).ok();
     }
@@ -1954,5 +2048,74 @@ mod tests {
         assert_eq!(hits[0].kind, "text");
         assert!(hits[0].snippet.contains("项目评审"), "标题命中时片段显示标题");
         fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn 主文件坏了用_bak_兜底并把主文件修好() {
+        let d = tmpdir();
+        let n = create(&d, "笔记").unwrap();
+        save(&d, &n.id, doc_with("第一版")).unwrap();
+        save(&d, &n.id, doc_with("第二版")).unwrap(); // 这时 .bak 里是"第一版"
+
+        let path = note_path(&d, &n.id);
+        fs::write(&path, b"{ \xe5\x86\x99\xe5\x9d\x8f\xe4\xba\x86").unwrap(); // 半截 JSON
+
+        // 列表里不能消失
+        assert_eq!(list(&d).len(), 1, "主文件坏了也要能列出这篇笔记");
+
+        // 打开的是上一版，不是"笔记不存在"
+        let loaded = load(&d, &n.id).expect("应该用 .bak 打开");
+        assert_eq!(loaded.doc, doc_with("第一版"), "恢复到上一版");
+
+        // 主文件已经就地修好：下一次打开走正常路径
+        let raw = fs::read_to_string(&path).unwrap();
+        assert!(
+            serde_json::from_str::<Value>(&raw).is_ok(),
+            "主文件应该被 .bak 覆盖回合法 JSON"
+        );
+        assert_eq!(load(&d, &n.id).unwrap().doc, doc_with("第一版"));
+
+        fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn 旧标识目录的数据搬进新目录且只搬一次() {
+        let root = std::env::temp_dir().join(format!(
+            "c2g-migrate-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let old = root.join(PREVIOUS_APP_DIR);
+        let new = root.join("com.click2get.app");
+        fs::create_dir_all(&old).unwrap();
+        fs::create_dir_all(&new).unwrap();
+        ensure_dirs(&old);
+        ensure_dirs(&new);
+
+        // 旧目录里：一篇有内容的笔记 + 一张图 + 设置
+        let n = create(&old, "旧笔记").unwrap();
+        save(&old, &n.id, doc_with("旧版本里抄的东西")).unwrap();
+        let sub = old.join("images").join("aa").join("bb");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(sub.join("x.png"), b"not-a-real-png").unwrap();
+        fs::write(old.join("settings.json"), b"{\"monitoring\":false}").unwrap();
+
+        migrate_previous_app_dir(&new);
+
+        assert_eq!(list(&new).len(), 1, "旧目录里的笔记应该搬过来");
+        assert_eq!(
+            load(&new, &n.id).unwrap().doc,
+            doc_with("旧版本里抄的东西")
+        );
+        assert!(new.join("images").join("aa").join("bb").join("x.png").exists());
+        assert!(new.join("settings.json").exists());
+
+        // 第二次：新目录已经有笔记了，一个字节都不该再动
+        let extra = create(&new, "新写的").unwrap();
+        migrate_previous_app_dir(&new);
+        assert_eq!(list(&new).len(), 2, "不应该把旧数据再混一遍");
+        assert!(load(&new, &extra.id).is_ok());
+
+        fs::remove_dir_all(&root).ok();
     }
 }
