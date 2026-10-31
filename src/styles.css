@@ -20,6 +20,11 @@
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.06), 0 10px 28px rgba(0, 0, 0, 0.1);
   --toast-bg: #ffffff;
   --newbar-bg: #eef3ff;
+  /* 图片在正文里的默认宽度：比整栏窄，长截图也不至于一屏放不下 */
+  --img-default: 420px;
+  --mark-bg: rgba(47, 107, 255, 0.18);
+  /* 选中图片时盖在上面的浅蓝色遮罩：和文字选区一个观感（见 .c2g-img-mask） */
+  --selection-mask: rgba(47, 107, 255, 0.26);
 
   --r-card: 12px;
   --r-ctrl: 8px;
@@ -44,6 +49,9 @@
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 10px 28px rgba(0, 0, 0, 0.35);
   --toast-bg: #1b1b20;
   --newbar-bg: #1b2030;
+  --img-default: 420px;
+  --mark-bg: rgba(91, 140, 255, 0.3);
+  --selection-mask: rgba(91, 140, 255, 0.3);
 }
 
 * {
@@ -86,14 +94,113 @@ body {
   transition: width var(--t), opacity var(--t), border-color var(--t);
 }
 
+/* 拖宽的时候不能有过渡，否则手指和边线对不上 */
+.side.resizing {
+  transition: none;
+}
+
 .side.collapsed {
   width: 0;
   opacity: 0;
   border-right-color: transparent;
 }
 
+/*
+ * 收起状态下，鼠标停在侧栏图标上浮出来的"临时侧栏"。
+ *
+ * 用 position: fixed 而不是 grid/flex 里的一列：它不占布局，所以浮出来的时候
+ * 正文一个字都不会挪（收起侧栏本来就是为了把宽度让给正文，浮一下不该又挤回去）。
+ * 顶部从标题栏下面开始 —— 图标本身还露在外面，才能点它"固定"。
+ */
+.side.collapsed.peek {
+  position: fixed;
+  left: 0;
+  top: 44px;
+  bottom: 0;
+  z-index: 45;
+  opacity: 1;
+  overflow: hidden;
+  border-right: 1px solid var(--line-strong);
+  border-radius: 0 10px 10px 0;
+  background: var(--bg-side);
+  box-shadow: var(--shadow);
+  /* 宽度是"浮出来"的，不要再走 .side 那条宽度过渡（和 keyframe 打架） */
+  transition: none;
+  animation: peekin 130ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+@keyframes peekin {
+  from {
+    opacity: 0;
+    transform: translateX(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/*
+ * 收回：先在 fixed 状态里淡出 / 往左滑，动画播完 App 才把它交回布局。
+ * 这期间它仍然盖在正文上，不会挤动任何东西 —— 以前一去掉 .peek 就变回
+ * 文档流里的一列，width 从 236 过渡到 0，正文跟着一路缩回去，看着就是"页面跳了一下"。
+ */
+.side.collapsed.peek.peek-out {
+  animation: peekout 130ms cubic-bezier(0.4, 0, 1, 1) forwards;
+  /* 已经在收了，别让它继续抢鼠标事件 */
+  pointer-events: none;
+}
+
+@keyframes peekout {
+  from {
+    opacity: 1;
+    transform: none;
+  }
+  to {
+    opacity: 0;
+    transform: translateX(-8px);
+  }
+}
+
+/*
+ * 浮层交回布局的那一帧：把过渡全关掉。
+ * 没有这条，width 会从 sideWidth 过渡到 0；有这条，正文的位置从头到尾没变过
+ * （浮层本来就只是"浮在上面"的一层，收起来不该动正文）。
+ */
+.side.settling {
+  transition: none !important;
+}
+
+/* 侧栏的拖宽手柄：贴在左右两栏的分界线上，6px 宽，光标变成左右箭头 */
+.side-resizer {
+  flex: 0 0 6px;
+  width: 6px;
+  margin-left: -3px;
+  position: relative;
+  z-index: 5;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.side-resizer::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 2px;
+  width: 2px;
+  border-radius: 2px;
+  background: transparent;
+  transition: background var(--t);
+}
+
+.side-resizer:hover::after,
+.side-resizer.dragging::after {
+  background: var(--accent-soft);
+}
+
 .side-inner {
-  width: 236px;
+  width: 100%;
   height: 100%;
   display: flex;
   flex-direction: column;
@@ -131,6 +238,14 @@ body {
   border-color: var(--line-strong);
 }
 
+/* 长按拖着内容停在这里 = 搬进一篇新笔记（见 editor/dragMove.ts 的 onDropOnNewNote） */
+.new-btn.drop-on {
+  border-color: var(--accent);
+  background: var(--bg-active);
+  color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
 .new-btn .plus {
   font-size: 15px;
   line-height: 1;
@@ -141,6 +256,9 @@ body {
   flex: 1 1 auto;
   overflow-y: auto;
   padding: 2px 8px 8px;
+  /* 滚动条出现时占的那 8px 一直留着：否则笔记一多、滚动条一冒出来，
+     整个列表的宽度就缩一下，标题跟着重排 —— 看着就是"界面跳了一下"。 */
+  scrollbar-gutter: stable;
   scrollbar-width: thin;
   scrollbar-color: var(--scroll-thumb) transparent;
 }
@@ -210,6 +328,99 @@ body {
   font-weight: 500;
 }
 
+/* 多选：勾选圈 + 选中的底色（和"当前打开"分开：active 是正在看的，picked 是被选中的） */
+.item .pick {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 14px;
+  height: 14px;
+  margin-right: 1px;
+  border: 1.5px solid var(--line-strong);
+  border-radius: 50%;
+  color: #fff;
+  transition: background var(--t), border-color var(--t);
+}
+
+.item .pick.on {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
+.item.picked {
+  background: var(--bg-active);
+}
+
+.item.multi {
+  padding-left: 6px;
+}
+
+/* 置顶标记：小小的图钉，不抢标题的地方 */
+.item .pin {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  color: var(--accent);
+  opacity: 0.85;
+}
+
+/* 长按把图拖到这篇笔记上时的落点提示 */
+.item.drop-on {
+  outline: 1.5px dashed var(--accent);
+  outline-offset: -3px;
+  background: var(--bg-active);
+  color: var(--fg);
+}
+
+/* 多选时的底部操作条 */
+.pick-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 10px;
+  border-top: 1px solid var(--line);
+  background: var(--bg-side);
+  font-size: 12px;
+  color: var(--fg-dim);
+}
+
+.pick-info {
+  color: var(--fg-dim);
+}
+
+.mini-btn {
+  height: 24px;
+  padding: 0 9px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg-dim);
+  font-family: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+  transition: background var(--t), color var(--t), border-color var(--t);
+}
+
+.mini-btn:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+/* 暂时没得点的（比如收纳箱空着时的"全部放入"） */
+.mini-btn:disabled,
+.mini-btn:disabled:hover {
+  background: transparent;
+  color: var(--fg-mute);
+  opacity: 0.55;
+  cursor: default;
+}
+
+/* 删除类按钮，鼠标悬上去才红 */
+.mini-btn:last-child:hover {
+  color: var(--fg);
+}
+
 .empty {
   padding: 10px;
   font-size: 12px;
@@ -269,6 +480,13 @@ body {
   color: var(--fg);
 }
 
+.menu-item:disabled,
+.menu-item:disabled:hover {
+  background: transparent;
+  color: var(--fg-mute);
+  cursor: default;
+}
+
 .menu-item.danger:hover {
   color: #d64545;
 }
@@ -277,6 +495,34 @@ body {
   height: 1px;
   margin: 4px 2px;
   background: var(--line);
+}
+
+/* ── 图片右键菜单 ─────────────────────────────────── */
+
+.ctx-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 55;
+}
+
+.ctx-menu {
+  position: fixed;
+  z-index: 56;
+  min-width: 176px;
+  padding: 5px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--toast-bg);
+  box-shadow: var(--shadow);
+  animation: fadein 120ms ease-out;
+}
+
+.ctx-title {
+  padding: 4px 9px 6px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--line);
+  color: var(--fg-mute);
+  font-size: 11px;
 }
 
 /* ── 主区 ─────────────────────────────────────────── */
@@ -309,46 +555,132 @@ body {
   text-overflow: ellipsis;
 }
 
-.spacer {
-  flex: 1;
-}
-
-.status {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 27px;
-  padding: 0 10px;
-  border-radius: 999px;
-  border: 1px solid var(--line);
+/* 标题就是一个按钮：点一下就地改名（样式上还是那行字，不是按钮） */
+.title-btn {
+  min-width: 0;
+  padding: 2px 6px;
+  margin: 0 -6px;
+  border: 1px solid transparent;
+  border-radius: 6px;
   background: transparent;
-  color: var(--fg-mute);
-  font-size: 12px;
   font-family: inherit;
-  cursor: pointer;
-  transition: background var(--t), color var(--t), border-color var(--t);
+  text-align: left;
+  cursor: text;
+  transition: background var(--t), border-color var(--t), color var(--t);
 }
 
-.status:hover {
+.title-btn:hover {
+  border-color: var(--line);
   background: var(--bg-hover);
   color: var(--fg);
 }
 
-.status .dot {
+/* 改标题的输入框：就地长在标题的位置上，宽度跟着内容走一点，上限还是 46% */
+.title-input {
+  height: 24px;
+  min-width: 120px;
+  padding: 0 6px;
+  border: 1px solid var(--accent-soft);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  outline: none;
+  text-overflow: ellipsis;
+}
+
+/* 标题栏右边那组控件：长按可以拖动换顺序（见 BarControls.tsx） */
+.bar-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.bar-item {
+  display: flex;
+  align-items: center;
+  transition: opacity var(--t), transform var(--t);
+}
+
+/* 抬起来的那一项：淡一点、缩一点，其余几项跟着让位 */
+.bar-item.dragging {
+  opacity: 0.45;
+  transform: scale(0.9);
+}
+
+body.bar-reordering,
+body.bar-reordering * {
+  cursor: grabbing !important;
+  user-select: none !important;
+}
+
+.spacer {
+  flex: 1;
+}
+
+/*
+ * 监控开关就一个小圆点：绿点 = 正在监听剪贴板，灰点 = 已暂停。
+ * 以前的胶囊形按钮写着"监控中/已暂停"，比标题还抢眼，现在只留颜色。
+ */
+.mon {
+  display: grid;
+  place-items: center;
+  width: 27px;
+  height: 27px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--r-ctrl);
+  background: transparent;
+  cursor: pointer;
+  /* 标题栏菜单（更多）开着的时候也能点它：z-index 压在 backdrop 之上，
+     这样点它不会顺手把选项列收起来 */
+  position: relative;
+  z-index: 22;
+  transition: background var(--t);
+}
+
+.mon:hover {
+  background: var(--bg-hover);
+}
+
+.mon .dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--fg-mute);
+  transition: background var(--t), box-shadow var(--t);
+}
+
+.mon.on .dot {
+  background: var(--accent);
+  animation: pulse 2.4s ease-out infinite;
+}
+
+/* 菜单里的监控开关：带一个状态点，点了菜单不关 */
+.menu-item.switch-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.switch-row .dot {
   width: 7px;
   height: 7px;
   border-radius: 50%;
   background: var(--fg-mute);
 }
 
-.status.on {
-  color: var(--fg-dim);
-  border-color: var(--accent-soft);
+.switch-row .dot.on {
+  background: var(--accent);
 }
 
-.status.on .dot {
-  background: var(--accent);
-  animation: pulse 2.4s ease-out infinite;
+/* 菜单里"夜间模式"这类开关：右边跟一个开/关的小字 */
+.menu-item .menu-state {
+  margin-left: auto;
+  color: var(--fg-mute);
+  font-size: 11.5px;
 }
 
 @keyframes pulse {
@@ -388,6 +720,8 @@ body {
   flex: 1 1 auto;
   overflow-y: auto;
   overflow-x: hidden;
+  /* 同上：把滚动条的位置预留出来，正文宽度不再因为"滚动条出现"而变窄 */
+  scrollbar-gutter: stable;
   scrollbar-width: thin;
   scrollbar-color: var(--scroll-thumb) transparent;
 }
@@ -423,40 +757,608 @@ body {
   user-select: text;
   caret-color: var(--accent);
   color: var(--fg);
+  line-height: 1.7;
 }
 
-/* 捕获的块：没有卡片、没有边框、没有底色，只靠留白区分 */
+/* 捕获的块：没有卡片、没有边框、没有底色，只靠段间距（下面那 14px）区分。 */
 .c2g-editor [data-capture] {
   background: none;
   border: 0;
   padding: 0;
-  margin: 0 0 18px;
 }
 
-.c2g-editor [data-capture] > p:first-child {
-  margin-top: 0;
-}
-
+/* 复制来的文字保留原文的空格与换行位置：行首的缩进不该被折叠掉 */
 .c2g-editor [data-capture] p {
-  margin: 0 0 4px;
   white-space: pre-wrap;
   word-break: break-word;
 }
 
-.c2g-editor [data-capture] p:last-child {
-  margin-bottom: 0;
+/*
+ * 行间距只有一个来源：**上一行到这一行的距离**，14px。
+ * 于是三种换行各归各位，一眼能分辨：
+ *
+ *   回车      → 新起一个段落，与上一行差 14px；
+ *   Shift+回车 → 同一个段落里的 <br>，只差一个行高（1.7），没有这 14px；
+ *   复制进来的换行 → 也是 <br>（editor/insert.ts 里落成硬换行），跟 Shift+回车一样。
+ *
+ * 浏览器默认给 p 上下各 1em，先清零。这里特意用 :where() —— 它的权重是 0，
+ * 整条规则停在 (0,1,0)，下面 `* + *` / `[data-capture] > * + *` 才压得住它。
+ * 以前块内写的是 `[data-capture] p { margin: 0 }`（0,2,1），比 14px 那条（0,2,0）还高，
+ * 于是 14px 在块里从来没生效过：块内两行紧贴、块与块之间却有 14px，
+ * "复制进来的一段"看着就比手打回车空一截。
+ */
+.c2g-editor :where(p) {
+  margin: 0;
 }
 
-.c2g-editor [data-capture] img {
-  display: block;
+.c2g-editor > * + * {
+  margin-top: 14px;
+}
+
+.c2g-editor > :first-child {
+  margin-top: 0;
+}
+
+.c2g-editor [data-capture] > * + * {
+  margin-top: 14px;
+}
+
+.c2g-editor [data-capture] > :first-child {
+  margin-top: 0;
+}
+
+/*
+ * 图片尺寸的唯一真相：宽度由节点上的 width 属性（px）决定，
+ * 高度一律 height:auto，再用 max-width 兜住一栏。
+ * 只要不给 height 写死，任何来源的图都不会被拉变形。
+ *
+ * display 是 inline-block 而不是 block：图片是**行内节点**，它前面和后面
+ * 各有一个真实的光标位置 —— 点在这一行的空白处，光标就停在图片旁边，
+ * 可以直接接着写字。块级图片的前后是块边界，光标没地方落。
+ */
+.c2g-editor img {
+  display: inline-block;
+  vertical-align: middle;
   max-width: 100%;
   height: auto;
   border-radius: 6px;
-  margin: 2px 0 0;
+  margin: 1px 0;
 }
 
-.c2g-editor > p {
-  margin: 0 0 10px;
+/* 没有拖过宽度的图片走"默认宽度"：比整栏短一截，长截图也不占满屏 */
+.c2g-editor img:not([width]) {
+  max-width: min(100%, var(--img-default));
+}
+
+/* 图下不再挂备注：一张图的备注属于图片本身，在图库预览里管理 */
+
+/* 选中一张图：蓝色描边 + 一圈淡色光晕，一眼看得出"现在操作的是这张" */
+.c2g-editor img.ProseMirror-selectednode {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+  box-shadow: 0 0 0 8px var(--bg-active);
+}
+
+/* 链接：蓝、下划线、手指光标；点击交给 App 的 handleClick 打开浏览器 */
+.c2g-editor a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-decoration-color: var(--accent-soft);
+  text-underline-offset: 2px;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.c2g-editor a:hover {
+  text-decoration-color: var(--accent);
+}
+
+/* ── 图片缩放手柄 ─────────────────────────────────── */
+
+/* 外框只负责挂手柄和宽度标签：选中状态由图片自己的描边表示（见上面
+   img.ProseMirror-selectednode），两层描边叠在一起会显得脏。 */
+.c2g-resize-box {
+  position: fixed;
+  z-index: 15;
+  display: none;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  pointer-events: none;
+}
+
+.c2g-resize-box.c2g-resize-active {
+  border-color: var(--accent);
+}
+
+.c2g-rh {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 2px var(--bg);
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.c2g-rh-e {
+  right: -6px;
+  top: 50%;
+  margin-top: -6px;
+  cursor: ew-resize;
+}
+
+.c2g-rh-se {
+  right: -6px;
+  bottom: -6px;
+  cursor: nwse-resize;
+}
+
+/* 拖动时显示的实时宽度 */
+.c2g-rw {
+  position: absolute;
+  left: 4px;
+  top: -26px;
+  padding: 1px 7px;
+  border-radius: 5px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 11px;
+  line-height: 17px;
+  white-space: nowrap;
+  opacity: 0;
+  transition: opacity var(--t);
+}
+
+.c2g-resize-active .c2g-rw {
+  opacity: 1;
+}
+
+.c2g-img-resizing,
+.c2g-img-resizing * {
+  cursor: ew-resize !important;
+  user-select: none !important;
+}
+
+body.c2g-img-dragging .c2g-resize-box {
+  display: none !important;
+}
+
+/* ── 长按拖图 ─────────────────────────────────────── */
+
+.c2g-editor img {
+  -webkit-user-drag: none;
+  user-select: none;
+  cursor: grab;
+}
+
+.c2g-editor img.c2g-img-lifted {
+  opacity: 0.28;
+  filter: grayscale(0.2);
+  cursor: grabbing;
+}
+
+.c2g-img-dragging,
+.c2g-img-dragging * {
+  cursor: grabbing !important;
+  user-select: none !important;
+}
+
+.c2g-img-ghost {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 90;
+  border-radius: 6px;
+  opacity: 0.92;
+  pointer-events: none;
+  box-shadow: 0 10px 34px rgba(0, 0, 0, 0.32);
+  object-fit: contain;
+}
+
+.c2g-drop-line {
+  position: fixed;
+  z-index: 91;
+  height: 3px;
+  border-radius: 999px;
+  background: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent-soft);
+  pointer-events: none;
+  animation: dropline 90ms ease-out;
+}
+
+@keyframes dropline {
+  from {
+    opacity: 0;
+    transform: scaleX(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: scaleX(1);
+  }
+}
+
+/*
+ * "内容原来在这儿"的灰虚线。
+ *
+ * 拖动时原文会淡下去（.c2g-lift / .c2g-img-lifted），光淡下去看不出它原本占的是哪一行；
+ * 这条线钉在原位置，蓝色的落点线才是"要放到哪儿"，两者颜色/线型都不一样，不会混。
+ *
+ * 同一条缝里只能有一个提示：落点线正好也落在这条缝里时，灰线会被藏起来
+ * （见 editor/dragMove.ts 的 placeOriginLine），免得看起来像"这里有两个位置"。
+ */
+.c2g-origin-line {
+  position: fixed;
+  z-index: 89;
+  height: 0;
+  border-top: 2px dashed var(--fg-mute);
+  opacity: 0.7;
+  pointer-events: none;
+}
+
+/*
+ * 拖动时贴在**编辑面板右侧**（竖直居中）的垃圾图标：拖到这上面松手 = 删除这部分内容。
+ * 只在"抬起内容"之后才出现（由 dragMove.ts 建 / 删），平时不存在；
+ * 具体贴在哪个像素由 dragMove.ts 的 placeTrash() 按面板算，这里只管外观。
+ */
+.c2g-trash-zone {
+  position: fixed;
+  z-index: 96;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  width: 58px;
+  padding: 8px 0 6px;
+  border: 1.5px dashed var(--line-strong);
+  border-radius: 12px;
+  background: var(--toast-bg);
+  color: var(--fg-mute);
+  font-size: 11px;
+  line-height: 1.2;
+  box-shadow: var(--shadow);
+  animation: trashin 130ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+.c2g-trash-zone svg {
+  width: 20px;
+  height: 20px;
+}
+
+/* 指针压上来：整块变红，一眼知道松手就没了 */
+.c2g-trash-zone.hot {
+  border-style: solid;
+  border-color: #e5484d;
+  background: rgba(229, 72, 77, 0.12);
+  color: #e5484d;
+  transform: scale(1.06);
+}
+
+@keyframes trashin {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/*
+ * 收纳箱 —— 贴在**删除图标上面**的常驻小箱子。
+ *
+ * 拖动时把内容拖到这儿松手 = 先收着（正文里那份删掉，箱子里留一份），
+ * 箱子带着数量停在这儿，可以跨笔记一件件攒；光标放到合适的地方，点它把内容放出来。
+ *
+ * 什么时候露面（见 CollectBox.tsx 与 dragMove.ts）：
+ * - 箱子里有东西 → 一直在，好让人随时想起来点它；
+ * - 正拖着东西（body.c2g-img-dragging）→ 空箱子也露出来，提示"这儿能放"。
+ * 具体贴在哪个像素由 CollectBox 按编辑面板算，和 placeTrash() 同一套坐标。
+ */
+.c2g-collect {
+  position: fixed;
+  z-index: 95;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  width: 58px;
+  padding: 7px 0 5px;
+  border: 1.5px dashed var(--line-strong);
+  border-radius: 12px;
+  background: var(--toast-bg);
+  color: var(--fg-mute);
+  font-size: 11px;
+  line-height: 1.2;
+  cursor: pointer;
+  box-shadow: var(--shadow);
+  opacity: 0;
+  transform: translateY(6px);
+  pointer-events: none;
+  transition: opacity 130ms cubic-bezier(0.2, 0, 0, 1),
+    transform 130ms cubic-bezier(0.2, 0, 0, 1), border-color 120ms, color 120ms, background 120ms;
+}
+
+.c2g-collect.filled,
+body.c2g-img-dragging .c2g-collect {
+  opacity: 1;
+  transform: none;
+  pointer-events: auto;
+}
+
+.c2g-collect svg {
+  width: 20px;
+  height: 20px;
+}
+
+/* 数量：攒了几件一眼能看到，不用打开箱子 */
+.c2g-collect-count {
+  position: absolute;
+  top: -7px;
+  right: -7px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 11px;
+  line-height: 18px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+}
+
+/* 指针压上来：整块变蓝，一眼知道松手就收进去（和删除图标那边的"变红"对应） */
+.c2g-collect.hot {
+  border-style: solid;
+  border-color: var(--accent);
+  background: var(--bg-active);
+  color: var(--accent);
+  transform: scale(1.06);
+}
+
+.c2g-collect.open {
+  border-style: solid;
+  border-color: var(--accent-soft);
+  color: var(--accent);
+}
+
+.c2g-collect-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 94;
+}
+
+.c2g-collect-panel {
+  position: fixed;
+  z-index: 97;
+  display: flex;
+  flex-direction: column;
+  width: 316px;
+  max-height: calc(100vh - 100px);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--toast-bg);
+  box-shadow: var(--shadow);
+  animation: fadein 120ms ease-out;
+}
+
+.c2g-collect-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+  color: var(--fg-dim);
+  font-size: 12px;
+}
+
+.c2g-collect-list {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 5px;
+  scrollbar-width: thin;
+}
+
+.c2g-collect-empty {
+  padding: 12px 10px;
+  color: var(--fg-mute);
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.c2g-collect-row {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  border-radius: 8px;
+}
+
+.c2g-collect-row:hover {
+  background: var(--bg-hover);
+}
+
+.c2g-collect-item {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 7px 6px 7px 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.c2g-collect-thumb {
+  flex: 0 0 auto;
+  width: 40px;
+  height: 40px;
+  border-radius: 6px;
+  object-fit: cover;
+  background: var(--bg-hover);
+}
+
+.c2g-collect-body {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+/* 预览只留前三行：箱子是"扫一眼挑一条"的地方，不是阅读器 */
+.c2g-collect-text {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  color: var(--fg);
+  font-size: 12.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.c2g-collect-text.muted {
+  color: var(--fg-mute);
+}
+
+.c2g-collect-meta {
+  overflow: hidden;
+  color: var(--fg-mute);
+  font-size: 11px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.c2g-collect-remove {
+  flex: 0 0 auto;
+  width: 26px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--fg-mute);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.c2g-collect-remove:hover {
+  background: var(--bg-hover);
+  color: #d64545;
+}
+
+.c2g-collect-foot {
+  flex: 0 0 auto;
+  padding: 7px 10px;
+  border-top: 1px solid var(--line);
+  color: var(--fg-mute);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+/* 拖"选中的几行"：原文先淡下去（inline decoration），指针跟一张纸条。
+ * 纸条里只放前几行 + 行数 —— 拖一整篇长文也别糊满屏幕。
+ */
+.c2g-lift {
+  opacity: 0.3;
+}
+
+/* 拖动时原生选区的高亮收起来，只留淡下去的原文，不然两层叠在一起 */
+body.c2g-img-dragging *::selection {
+  background: transparent;
+}
+
+/* ── 选中图片的浅蓝色遮罩 ───────────────────────────
+   图片是 <img>，浏览器不会像文字那样给它画选区底色（::selection 在替换元素上不可见），
+   所以由 editor/imageMask.ts 在图片盒子上压一层同色的半透明方块。
+   层级压在缩放手柄（15）之下、正文之上；纯装饰，不吃鼠标事件。 */
+.c2g-img-mask-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 13;
+  pointer-events: none;
+}
+
+.c2g-img-mask {
+  position: fixed;
+  border-radius: 6px;
+  background: var(--selection-mask);
+  pointer-events: none;
+}
+
+/* 拖动中：图片本身已经"抬起来"（淡下去 + 跟着指针的 ghost），遮罩就别再盖着 */
+.c2g-img-dragging .c2g-img-mask {
+  display: none !important;
+}
+
+.c2g-drag-ghost {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 90;
+  max-width: 420px;
+  padding: 9px 12px;
+  border: 1px solid var(--accent-soft);
+  border-radius: 8px;
+  background: var(--toast-bg);
+  box-shadow: 0 10px 34px rgba(0, 0, 0, 0.28);
+  pointer-events: none;
+  opacity: 0.95;
+  animation: ghostin 90ms ease-out;
+}
+
+.c2g-drag-ghost-text {
+  max-height: 136px;
+  overflow: hidden;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--fg);
+}
+
+.c2g-drag-ghost-badge {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--fg-mute);
+}
+
+@keyframes ghostin {
+  from {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+  to {
+    opacity: 0.95;
+    transform: none;
+  }
+}
+
+/* 重复捕获命中时，"原件"闪一下（只闪看的见的，不抢光标、不滚屏） */
+.c2g-dup-flash {
+  border-radius: 4px;
+  animation: dupflash 1.2s ease-out;
+}
+
+@keyframes dupflash {
+  0% {
+    background: var(--accent-soft);
+  }
+  55% {
+    background: var(--accent-soft);
+  }
+  100% {
+    background: transparent;
+  }
 }
 
 /* ── 浮层 ─────────────────────────────────────────── */
@@ -494,12 +1396,18 @@ body {
   position: absolute;
   right: 18px;
   bottom: 22px;
+  /* 提示要盖得住所有弹层（图片库 60 / 大图预览 70），否则在弹层里操作的成功/失败
+     消息会被那层半透明底吞掉，看着像"点了没反应" */
+  z-index: 92;
+  max-width: 340px;
   padding: 6px 12px;
   border-radius: var(--r-ctrl);
   background: var(--toast-bg);
   border: 1px solid var(--line);
   color: var(--fg-dim);
   font-size: 12px;
+  line-height: 1.55;
+  word-break: break-word;
   box-shadow: var(--shadow);
   animation: fadein 180ms ease-out;
   pointer-events: none;
@@ -513,6 +1421,22 @@ body {
   to {
     opacity: 1;
     transform: translateY(0);
+  }
+}
+
+/*
+ * 只淡入、**不动 transform** 的版本。
+ *
+ * fadein 里带了 translateY，会盖掉元素自己的 transform —— 靠 transform 居中的东西
+ * （平铺视图面板 translate(-50%,-50%)、图片库备注栏 translateX(-50%)）就会先跑到
+ * 左上角 / 右边，动画结束才"啪"地跳回原位。这些元素用这个关键帧。
+ */
+@keyframes fadeonly {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
   }
 }
 
@@ -634,11 +1558,883 @@ body {
   border-color: var(--accent-soft);
 }
 
+/* 图片备注弹层 */
+.modal.wide {
+  width: 470px;
+}
+
+.note-preview {
+  display: flex;
+  gap: 11px;
+  align-items: center;
+  margin-bottom: 11px;
+}
+
+.note-preview img {
+  flex: 0 0 auto;
+  max-width: 104px;
+  max-height: 76px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--code-bg);
+  object-fit: contain;
+}
+
+.note-preview-hint {
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--fg-mute);
+}
+
+/* OCR 结果：可编辑的文本框（识别一定有错，先改再存） */
+.ocr-preview {
+  display: flex;
+  gap: 11px;
+  align-items: center;
+  margin-bottom: 11px;
+}
+
+.ocr-preview img {
+  flex: 0 0 auto;
+  max-width: 104px;
+  max-height: 76px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--code-bg);
+  object-fit: contain;
+}
+
+.ocr-edit {
+  min-height: 150px;
+  max-height: 46vh;
+  font-size: 13px;
+  line-height: 1.75;
+}
+
+/* 图片库：每张图右上角的"备注"入口（有备注时常亮） */
+.lib-annotate {
+  position: absolute;
+  top: 6px;
+  right: 32px;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.5);
+  color: #fff;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--t), background var(--t);
+}
+
+.lib-tile:hover .lib-annotate {
+  opacity: 1;
+}
+
+.lib-annotate.has {
+  opacity: 1;
+  background: var(--accent);
+}
+
+.lib-annotate:hover {
+  background: var(--accent);
+}
+
+.ocr-text {
+  max-height: 40vh;
+  margin: 0 0 10px;
+  padding: 10px 12px;
+  overflow: auto;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--code-bg);
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.75;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.modal-textarea {
+  width: 100%;
+  min-height: 104px;
+  max-height: 42vh;
+  margin-bottom: 14px;
+  padding: 8px 10px;
+  resize: vertical;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.7;
+  outline: none;
+  transition: border-color var(--t);
+}
+
+.modal-textarea:focus {
+  border-color: var(--accent-soft);
+}
+
+.modal-actions .spacer {
+  flex: 1;
+}
+
+/* ── 全局搜索 ─────────────────────────────────────── */
+
+.search-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 65;
+  display: grid;
+  place-items: start center;
+  padding-top: 11vh;
+  background: rgba(0, 0, 0, 0.32);
+  animation: fadein 120ms ease-out;
+}
+
+.search {
+  display: flex;
+  flex-direction: column;
+  width: min(620px, calc(100vw - 56px));
+  max-height: min(580px, 72vh);
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--bg);
+  box-shadow: var(--shadow);
+}
+
+.search-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  height: 46px;
+  padding: 0 12px 0 15px;
+  border-bottom: 1px solid var(--line);
+  color: var(--fg-mute);
+}
+
+.search-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
+  border: 0;
+  background: transparent;
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 14.5px;
+  outline: none;
+}
+
+.search-input::placeholder {
+  color: var(--fg-mute);
+}
+
+.search-kbd {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  color: var(--fg-mute);
+  font-family: inherit;
+  font-size: 10.5px;
+  line-height: 1.6;
+}
+
+.search-loading {
+  width: 11px;
+  height: 11px;
+  border: 2px solid var(--line-strong);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 620ms linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.search-body {
+  flex: 1 1 auto;
+  min-height: 120px;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  scrollbar-color: var(--scroll-thumb) transparent;
+}
+
+.search-body::-webkit-scrollbar {
+  width: 8px;
+}
+
+.search-body::-webkit-scrollbar-thumb {
+  background: var(--scroll-thumb);
+  border-radius: 4px;
+}
+
+.search-tip {
+  padding: 28px 18px;
+  color: var(--fg-mute);
+  font-size: 12.5px;
+  line-height: 1.9;
+  text-align: center;
+}
+
+.search-hit {
+  display: block;
+  width: 100%;
+  padding: 9px 15px 10px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  color: var(--fg);
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--t);
+}
+
+.search-hit:last-child {
+  border-bottom: 0;
+}
+
+.search-hit:hover,
+.search-hit.on {
+  background: var(--bg-active);
+}
+
+.search-hit-top {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.search-hit-title {
+  max-width: 66%;
+  overflow: hidden;
+  color: var(--fg);
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.search-badge {
+  flex: 0 0 auto;
+  padding: 0 5px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--fg-mute);
+  font-size: 10.5px;
+  line-height: 1.6;
+}
+
+.search-badge.note {
+  border-color: var(--accent-soft);
+  color: var(--accent);
+}
+
+.search-count {
+  flex: 0 0 auto;
+  margin-left: auto;
+  color: var(--fg-mute);
+  font-size: 11px;
+}
+
+.search-hit-snippet {
+  display: -webkit-box;
+  margin-top: 3px;
+  overflow: hidden;
+  color: var(--fg-dim);
+  font-size: 12px;
+  line-height: 1.65;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.search-hit-snippet mark {
+  padding: 0 1px;
+  border-radius: 3px;
+  background: var(--mark-bg);
+  color: inherit;
+}
+
+.search-foot {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 14px;
+  border-top: 1px solid var(--line);
+  color: var(--fg-mute);
+  font-size: 11px;
+}
+
+/* ── 图片库 ───────────────────────────────────────── */
+
+.lib-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.34);
+  animation: fadein 120ms ease-out;
+}
+
+.lib {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: min(900px, calc(100vw - 72px));
+  height: min(640px, calc(100vh - 72px));
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--bg);
+  box-shadow: var(--shadow);
+}
+
+.lib-head,
+.lib-foot {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px 10px 18px;
+}
+
+.lib-head {
+  border-bottom: 1px solid var(--line);
+}
+
+.lib-foot {
+  border-top: 1px solid var(--line);
+  font-size: 12.5px;
+  color: var(--fg-dim);
+}
+
+.lib-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.lib-sub {
+  font-size: 12px;
+  color: var(--fg-mute);
+}
+
+.lib-selinfo b {
+  color: var(--fg);
+  font-weight: 600;
+}
+
+/* 视图切换：按时间 / 按笔记 */
+.lib-views {
+  display: inline-flex;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg-hover);
+}
+
+.lib-views button {
+  height: 22px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg-mute);
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background var(--t), color var(--t);
+}
+
+.lib-views button:hover {
+  color: var(--fg);
+}
+
+.lib-views button.on {
+  background: var(--bg);
+  color: var(--fg);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+}
+
+.lib-sort {
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg-dim);
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background var(--t), color var(--t);
+}
+
+.lib-sort:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+/* 按笔记分组 */
+.lib-group {
+  border-top: 1px solid var(--line);
+}
+
+.lib-group:first-child {
+  border-top: 0;
+}
+
+.lib-group-head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 16px 3px;
+  background: var(--bg);
+}
+
+.lib-group-title {
+  max-width: 58%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: color var(--t);
+}
+
+.lib-group-title:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.lib-group-title.static {
+  color: var(--fg-mute);
+  font-weight: 500;
+  cursor: default;
+  text-decoration: none;
+}
+
+.lib-group-count {
+  font-size: 11.5px;
+  color: var(--fg-mute);
+}
+
+.mini-danger {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg-mute);
+  font-family: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+  transition: background var(--t), color var(--t), border-color var(--t);
+}
+
+.mini-danger:hover {
+  border-color: rgba(214, 69, 69, 0.5);
+  background: rgba(214, 69, 69, 0.08);
+  color: #d64545;
+}
+
+.lib-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.lib-body::-webkit-scrollbar {
+  width: 8px;
+}
+
+.lib-body::-webkit-scrollbar-thumb {
+  background: var(--scroll-thumb);
+  border-radius: 4px;
+}
+
+.lib-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
+  gap: 10px;
+  padding: 14px 16px 18px;
+}
+
+.lib-tile {
+  position: relative;
+  aspect-ratio: 1 / 1;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--code-bg);
+  cursor: pointer;
+  outline: none;
+  transition: border-color var(--t), box-shadow var(--t);
+}
+
+.lib-tile:hover {
+  border-color: var(--line-strong);
+}
+
+.lib-tile.on {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+.lib-tile:focus-visible {
+  border-color: var(--accent);
+}
+
+.lib-tile img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transition: transform 180ms ease-out;
+}
+
+.lib-tile:hover img {
+  transform: scale(1.03);
+}
+
+.lib-check {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  display: grid;
+  place-items: center;
+  width: 17px;
+  height: 17px;
+  border-radius: 50%;
+  border: 1.5px solid rgba(255, 255, 255, 0.85);
+  background: rgba(0, 0, 0, 0.22);
+  color: #fff;
+  opacity: 0;
+  transition: opacity var(--t), background var(--t);
+}
+
+.lib-tile:hover .lib-check {
+  opacity: 1;
+}
+
+.lib-check.on {
+  opacity: 1;
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
+.lib-used {
+  position: absolute;
+  left: 6px;
+  bottom: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 10px;
+  line-height: 1.6;
+  pointer-events: none;
+}
+
+/* 有备注的图：一直亮着的小标，点它直接开备注 */
+.lib-hasnote {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  padding: 1px 7px;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 10px;
+  line-height: 1.6;
+  cursor: pointer;
+  transition: background var(--t);
+}
+
+.lib-hasnote:hover {
+  background: var(--accent);
+}
+
+.lib-zoom {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.5);
+  color: #fff;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--t), background var(--t);
+}
+
+.lib-tile:hover .lib-zoom {
+  opacity: 1;
+}
+
+.lib-zoom:hover {
+  background: rgba(0, 0, 0, 0.72);
+}
+
+.lib-empty {
+  display: grid;
+  place-items: center;
+  gap: 10px;
+  height: 100%;
+  padding: 24px;
+  color: var(--fg-mute);
+  font-size: 13px;
+  line-height: 2;
+  text-align: center;
+}
+
+.lib-confirm-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.3);
+  animation: fadein 120ms ease-out;
+}
+
+/* 大图预览 */
+.lib-preview {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: grid;
+  place-items: center;
+  padding: 64px 44px;
+  background: rgba(0, 0, 0, 0.86);
+  animation: fadein 120ms ease-out;
+}
+
+.lib-preview img {
+  max-width: 92vw;
+  max-height: 80vh;
+  border-radius: 4px;
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.55);
+}
+
+/* 备注区打开时把图往上让一点，别被面板压住 */
+.lib-preview.with-note {
+  padding-bottom: 250px;
+}
+
+.lib-preview.with-note img {
+  max-height: 58vh;
+}
+
+/* 大图右键菜单：只在预览这一层里比 z-index（预览本身是 70，自成一层） */
+.lib-menu-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 4;
+}
+
+/* OCR 结果弹层：盖在大图上面 */
+.lib-ocr-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  display: grid;
+  place-items: center;
+  padding: 40px;
+  background: rgba(0, 0, 0, 0.58);
+  animation: fadeonly 120ms ease-out;
+}
+
+/* OCR 弹层里的小缩略图：别被上面 .lib-preview img 的大图规则撑开 */
+.lib-ocr-layer .note-preview img {
+  max-width: 104px;
+  max-height: 76px;
+}
+
+/* 大图预览里的备注编辑区 */
+.lib-note-panel {
+  position: absolute;
+  left: 50%;
+  bottom: 16px;
+  transform: translateX(-50%);
+  width: min(620px, calc(100vw - 72px));
+  padding: 12px 14px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 10px;
+  background: rgba(24, 24, 28, 0.94);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(10px);
+  text-align: left;
+  /* 它靠 translateX(-50%) 居中，不能用带 translateY 的 fadein（见 fadeonly 注释） */
+  animation: fadeonly 120ms ease-out;
+}
+
+.lib-note-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 8px;
+  color: #ececf1;
+  font-size: 12.5px;
+}
+
+.lib-note-hint {
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 11.5px;
+}
+
+.lib-note-input {
+  min-height: 76px;
+  max-height: 24vh;
+  margin-bottom: 10px;
+  border-color: rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.06);
+  color: #f2f2f5;
+}
+
+.lib-note-input::placeholder {
+  color: rgba(255, 255, 255, 0.35);
+}
+
+.lib-note-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.lib-note-actions .btn {
+  height: 26px;
+  border-color: rgba(255, 255, 255, 0.24);
+  color: #ececf1;
+}
+
+.lib-note-actions .btn:hover {
+  background: rgba(255, 255, 255, 0.16);
+  color: #fff;
+}
+
+.lib-note-actions .btn.primary {
+  border-color: transparent;
+  background: rgba(255, 255, 255, 0.9);
+  color: #1b1b1f;
+}
+
+.lib-note-actions .btn:disabled {
+  opacity: 0.55;
+}
+
+.lib-preview-bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  height: 46px;
+  padding: 0 12px 0 18px;
+  color: #ececf1;
+  font-size: 12.5px;
+  background: linear-gradient(rgba(0, 0, 0, 0.55), rgba(0, 0, 0, 0));
+}
+
+.lib-preview-bar .icon-btn {
+  margin-left: 0;
+  color: #ececf1;
+}
+
+.lib-preview-bar .icon-btn:hover {
+  background: rgba(255, 255, 255, 0.14);
+  color: #fff;
+}
+
+.lib-preview-bar .btn {
+  height: 26px;
+  border-color: rgba(255, 255, 255, 0.24);
+  color: #ececf1;
+}
+
+.lib-preview-bar .btn:hover {
+  background: rgba(255, 255, 255, 0.16);
+  color: #fff;
+}
+
+.lib-preview-bar .btn.on {
+  background: rgba(255, 255, 255, 0.22);
+  color: #fff;
+}
+
+.lib-preview-meta {
+  color: rgba(255, 255, 255, 0.62);
+}
+
+.lib-nav {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 40px;
+  height: 68px;
+  border: 0;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+  font-size: 30px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background var(--t);
+}
+
+.lib-nav:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.lib-nav.prev {
+  left: 14px;
+}
+
+.lib-nav.next {
+  right: 14px;
+}
+
 /* ── 排版细节 ─────────────────────────────────────── */
 
 .c2g-editor h1,
 .c2g-editor h2,
-.c2g-editor h3 {
+.c2g-editor h3,
+.c2g-editor [data-capture] > h1,
+.c2g-editor [data-capture] > h2,
+.c2g-editor [data-capture] > h3 {
   line-height: 1.35;
   margin: 18px 0 8px;
 }
@@ -685,4 +2481,784 @@ body {
 
 .c2g-editor ::selection {
   background: var(--bg-active);
+}
+/* ── 很窄的窗口（便签条形态） ───────────────────────
+   窗口最窄能到 220px：这时正文两侧的留白要跟着收，不然一行只剩几个字。
+   侧栏在这种宽度下会被自动收起（见 App.tsx 的窗口宽度监听）。 */
+@media (max-width: 560px) {
+  .bar {
+    gap: 2px;
+    padding: 0 6px;
+  }
+
+  /* 按钮跟着缩一圈：窗口最窄 220px 时，标题栏只放得下这几个小按钮 */
+  .icon-btn,
+  .mon {
+    width: 24px;
+    height: 24px;
+  }
+
+  /* 标题让位给按钮：一条便签上放不下"笔记标题 + 几个按钮" */
+  .bar .title {
+    display: none;
+  }
+
+  .c2g-editor {
+    padding: 16px 12px 96px;
+  }
+
+  .hint {
+    top: 18px;
+    padding: 0 12px;
+    font-size: 13.5px;
+  }
+
+  .newbar {
+    bottom: 14px;
+  }
+
+  .toast {
+    right: 10px;
+    left: 10px;
+    bottom: 14px;
+    max-width: none;
+  }
+
+  /* 图片库在这种宽度下铺满窗口，头部/底部按钮换行排 */
+  .lib {
+    width: calc(100vw - 12px);
+    height: calc(100vh - 12px);
+  }
+
+  .lib-head,
+  .lib-foot {
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 8px 10px;
+  }
+
+  .lib-grid {
+    grid-template-columns: repeat(auto-fill, minmax(92px, 1fr));
+    gap: 8px;
+    padding: 10px;
+  }
+}
+
+/* ── 托盘弹窗 ───────────────────────────────────────
+   系统托盘图标右键弹出来的小菜单，是独立窗口（src/TrayMenu.tsx）。
+   用 HTML 画而不是用系统原生菜单：原生菜单点一下必然收起，
+   而"暂停监控"要能连着点、菜单还得留着。
+
+   两条硬规则（不然就会出现"一圈黑框"）：
+   1. 窗口本身不画系统投影（tray.rs 里 shadow(false)）—— 无边框透明窗口的
+      系统阴影是贴着**窗口矩形**画的，不跟着圆角走，看着就是一圈黑边；
+   2. 卡片四周留一圈透明边（inset），投影只由 CSS 画，圆角外必须是透明的。
+   尺寸很小：窗口 176×136（逻辑像素），四行按钮各 25px —— 贴着任务栏弹出来
+   就是一个小方块，不抢画面。窗口尺寸和这里的布局是配套的（tray.rs 的
+   POPUP_W / POPUP_H），改高度记得两边一起改。 */
+html.tray-body,
+body.tray-body {
+  background: transparent;
+  overflow: hidden;
+}
+
+body.tray-body {
+  user-select: none;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.tray-menu {
+  position: absolute;
+  inset: 8px;
+  display: flex;
+  flex-direction: column;
+  padding: 4px;
+  border-radius: 9px;
+  background: var(--bg);
+  box-shadow:
+    0 0 0 1px var(--line),
+    0 2px 6px rgba(0, 0, 0, 0.08),
+    0 10px 22px rgba(0, 0, 0, 0.13);
+  animation: trayin 110ms ease-out;
+}
+
+@keyframes trayin {
+  from {
+    opacity: 0;
+    transform: translateY(3px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.tray-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  width: 100%;
+  height: 25px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--fg-dim);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1;
+  text-align: left;
+  cursor: pointer;
+  transition: background 90ms ease-out, color 90ms ease-out;
+}
+
+.tray-item:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.tray-item .dot {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  margin-right: 1px;
+  border-radius: 50%;
+  background: var(--fg-mute);
+}
+
+.tray-item .dot.on {
+  background: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.tray-item .tray-state {
+  margin-left: auto;
+  padding-left: 8px;
+  color: var(--fg-mute);
+  font-size: 10.5px;
+}
+
+.tray-item.danger:hover {
+  color: #d64545;
+}
+
+.tray-sep {
+  flex: 0 0 auto;
+  height: 1px;
+  margin: 3px 5px;
+  background: var(--line);
+}
+
+.tray-head {
+  padding: 4px 9px 6px;
+  color: var(--fg-mute);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+}
+
+
+/* ── 平铺预览（标题栏那个「四格」图标进去的弹窗）────────────
+   和图片库同一个样子：半透明底 + 居中的一块面板，不再铺满整个窗口 ——
+   点面板外的空白就退回去，底下的正文还看得见。
+   没有目录：一页就是全部笔记，铺成一片**等大的正方形格子**
+   （宽 = 高，见下面 .gal-card 的 aspect-ratio）。
+   层级压在确认弹层（40）之下：删笔记的弹层要能盖住这一页。 */
+
+.gal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 29;
+  background: rgba(0, 0, 0, 0.34);
+  animation: fadein 120ms ease-out;
+}
+
+.gal {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  z-index: 30;
+  transform: translate(-50%, -50%);
+  display: flex;
+  flex-direction: column;
+  width: min(1040px, calc(100vw - 72px));
+  height: min(720px, calc(100vh - 72px));
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--bg);
+  box-shadow: var(--shadow);
+  /* 面板靠 translate(-50%,-50%) 居中：只用淡入，别让 fadein 的 translateY 把它顶偏 */
+  animation: fadeonly 140ms ease-out;
+}
+
+.gal-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 46px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.gal-head {
+  min-width: 0;
+  overflow: hidden;
+}
+
+/* 标题栏只写"是全部笔记还是搜索结果" */
+.gal-title {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.25;
+  color: var(--fg);
+  max-width: 44vw;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.gal-sub {
+  font-size: 11.5px;
+  line-height: 1.3;
+  color: var(--fg-mute);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 搜索框：Ctrl+F 直接聚焦 */
+.gal-searchbox {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 27px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-ctrl);
+  background: var(--bg-side);
+  color: var(--fg-mute);
+  transition: border-color var(--t), background var(--t), color var(--t);
+}
+
+.gal-searchbox:focus-within {
+  border-color: var(--accent-soft);
+  background: var(--bg);
+  color: var(--accent);
+}
+
+.gal-search {
+  width: 176px;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 12.5px;
+  user-select: text;
+}
+
+.gal-search::placeholder {
+  color: var(--fg-mute);
+}
+
+.gal-search-clear {
+  display: grid;
+  place-items: center;
+  width: 17px;
+  height: 17px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--fg-mute);
+  cursor: pointer;
+}
+
+.gal-search-clear:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.gal-body {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 10px 14px 96px;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  scrollbar-color: var(--scroll-thumb) transparent;
+}
+
+.gal-body::-webkit-scrollbar {
+  width: 10px;
+}
+
+.gal-body::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-radius: 8px;
+  background-clip: content-box;
+  background-color: var(--scroll-thumb);
+}
+
+.gal-empty {
+  display: grid;
+  place-items: center;
+  gap: 10px;
+  padding: 60px 20px;
+  color: var(--fg-mute);
+  font-size: 12.5px;
+  text-align: center;
+}
+
+/* 一片格子：全部笔记卡片等宽排开（宽度一致 → 配合卡片的 aspect-ratio，
+   每张都是同样大小的正方形） */
+.gal-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(184px, 1fr));
+  gap: 12px;
+  align-items: start;
+  min-height: 64px;
+  padding: 2px;
+}
+
+.gal-grid-hint {
+  grid-column: 1 / -1;
+  display: grid;
+  place-items: center;
+  min-height: 58px;
+  color: var(--fg-mute);
+  font-size: 12px;
+}
+
+/* ── 笔记卡片 ─────────────────────────────────────── */
+
+/* 卡片 = 正方形：宽度由网格列宽决定，高度跟着宽度走（aspect-ratio），
+   所以同一片格子里的每张卡都长宽相等、大小一致。
+   卡片自己**不加** overflow:hidden —— 落点指示线贴在框外，得让它露出来；
+   内容溢出交给里面的 body / cover 自己裁。 */
+.gal-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  aspect-ratio: 1 / 1;
+  /* 网格项的自动最小尺寸是"内容高度"，不归零的话正文一长就把格子撑高、
+     正方形就没了 —— 这里压回 0，高度只认 aspect-ratio。 */
+  min-width: 0;
+  min-height: 0;
+  padding: 10px 12px 8px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg-side);
+  cursor: grab;
+  user-select: none;
+  transition: border-color var(--t), box-shadow var(--t), opacity var(--t);
+}
+
+.gal-card:active {
+  cursor: grabbing;
+}
+
+.gal-card:hover {
+  border-color: var(--line-strong);
+  box-shadow: var(--shadow);
+}
+
+/* 正在编辑的那篇：留个浅色的边 */
+.gal-card.current {
+  border-color: var(--accent-soft);
+}
+
+.gal-card.picked {
+  border-color: var(--accent);
+  background: var(--bg-active);
+}
+
+/* 正在被拖走的那几张：留在原位但是淡下去（布局不动，所以不会闪） */
+.gal-card.dragging {
+  opacity: 0.32;
+}
+
+/* 落点指示线：贴在目标卡片的外侧，绝对定位，不占地方也不引起重排 */
+.gal-card.drop-before::before,
+.gal-card.drop-after::after {
+  content: '';
+  position: absolute;
+  top: -5px;
+  bottom: -5px;
+  width: 3px;
+  border-radius: 2px;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+  pointer-events: none;
+}
+
+.gal-card.drop-before::before {
+  left: -7px;
+}
+
+.gal-card.drop-after::after {
+  right: -7px;
+}
+
+/* 封面按卡片高度的比例切一块：正方形格子不论多宽，图都不会把正文挤没 */
+.gal-cover {
+  position: relative;
+  flex: 0 0 44%;
+  min-height: 0;
+  margin: -10px -12px 8px;
+  overflow: hidden;
+  border-radius: 9px 9px 0 0;
+  background: var(--code-bg);
+}
+
+.gal-cover img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  pointer-events: none;
+}
+
+.gal-cover-more {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.gal-pin {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--accent);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.16);
+}
+
+/* 正文那块吃掉剩下所有高度；多了就从下面淡出（不硬切半行字） */
+.gal-card-body {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(180deg, #000 84%, transparent 100%);
+  mask-image: linear-gradient(180deg, #000 84%, transparent 100%);
+}
+
+.gal-card-title {
+  margin: 0 0 3px;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.45;
+  color: var(--fg);
+  word-break: break-word;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.gal-card-title.has-pin {
+  padding-right: 20px;
+}
+
+/* 正文预览：一行一段原样保留，多出来的由上面的 body 裁掉 */
+.gal-card-text {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.62;
+  color: var(--fg-dim);
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow: hidden;
+}
+
+.gal-card-blank {
+  color: var(--fg-mute);
+  font-style: italic;
+}
+
+.gal-card-foot {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: auto;
+  padding-top: 6px;
+  font-size: 11px;
+  color: var(--fg-mute);
+}
+
+.gal-card-meta,
+.gal-card-date {
+  flex: 0 0 auto;
+}
+
+.gal-card-date {
+  margin-left: auto;
+}
+
+/* 勾选圈：平时藏着，鼠标上来 / 多选 / 已选 才出现 */
+.gal-pick {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 1.5px solid var(--line-strong);
+  border-radius: 50%;
+  background: transparent;
+  color: #fff;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--t), background var(--t), border-color var(--t);
+}
+
+.gal-card:hover .gal-pick,
+.gal-card.picked .gal-pick,
+.gal-pick.show {
+  opacity: 1;
+}
+
+.gal-pick.on {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
+/* 跟着鼠标走的那张小条：位置由 JS 直接改 transform（不走 React 重画） */
+.gal-ghost {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 91;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 220px;
+  padding: 6px 10px;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  background: var(--toast-bg);
+  box-shadow: var(--shadow);
+  color: var(--fg);
+  font-size: 12px;
+  pointer-events: none;
+  will-change: transform;
+}
+
+.gal-ghost-count {
+  flex: 0 0 auto;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.gal-ghost-title {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.gal-drag-hint {
+  position: fixed;
+  left: 50%;
+  bottom: 18px;
+  z-index: 33;
+  transform: translateX(-50%);
+  padding: 5px 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--toast-bg);
+  box-shadow: var(--shadow);
+  color: var(--fg-dim);
+  font-size: 12px;
+  pointer-events: none;
+}
+
+/* 最下面那行手势说明 */
+.gal-foot {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 16px 2px 8px;
+}
+
+/* 拖动 / 多选的手势说明：按钮拿掉之后总要有个地方告诉人怎么用 */
+.gal-hint {
+  color: var(--fg-mute);
+  font-size: 11.5px;
+}
+
+/* 多选之后浮在底部的批量条 */
+.gal-bulk {
+  position: fixed;
+  left: 50%;
+  bottom: 16px;
+  z-index: 34;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--toast-bg);
+  box-shadow: var(--shadow);
+  /* 靠 translateX 居中，进场也只用淡入 */
+  transform: translateX(-50%);
+  animation: fadeonly 140ms ease-out;
+}
+
+.gal-bulk-info {
+  font-size: 12.5px;
+  color: var(--fg-dim);
+}
+
+.gal-bulk-info b {
+  color: var(--fg);
+  font-weight: 600;
+}
+
+/* 小图标按钮：到头了（最前/最后）就淡掉 */
+.mini:disabled {
+  opacity: 0.28;
+  cursor: default;
+}
+
+.mini:disabled:hover {
+  background: transparent;
+  color: var(--fg-mute);
+}
+
+/* 拖动中整页都是"攥着"的手势 */
+body.gal-dragging,
+body.gal-dragging * {
+  cursor: grabbing !important;
+}
+
+/* ── 小窗口下的平铺预览 ───────────────────────────────
+   平铺页是"弹窗"，但窗口本身就是一张便签（最窄 220px）时，
+   固定 1040×720 + 四周 72px 留白会把它挤到屏幕外面去。
+   这里让它跟着窗口走：留白收窄、面板铺满、格子换成更窄的列。
+   两个方向都要管 —— 又窄又矮的窗口同样是常态。 */
+
+@media (max-width: 720px), (max-height: 560px) {
+  .gal {
+    width: calc(100vw - 24px);
+    height: calc(100vh - 24px);
+    border-radius: 12px;
+  }
+
+  .gal-bar {
+    height: auto;
+    min-height: 42px;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 6px 8px;
+  }
+
+  .gal-search {
+    width: 110px;
+  }
+
+  .gal-grid {
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    gap: 9px;
+  }
+
+  .gal-body {
+    padding: 8px 10px 72px;
+  }
+}
+
+@media (max-width: 560px) {
+  .gal {
+    width: calc(100vw - 16px);
+    height: calc(100vh - 16px);
+    border-radius: 10px;
+  }
+
+  .gal-search {
+    width: 84px;
+  }
+
+  .gal-title {
+    max-width: 30vw;
+  }
+
+  .gal-grid {
+    /* 窄窗口少放几列：正方形跟着变宽，字才不至于挤成一条 */
+    grid-template-columns: repeat(auto-fill, minmax(116px, 1fr));
+    gap: 8px;
+  }
+
+  .gal-body {
+    padding: 8px 8px 64px;
+  }
+
+  .gal-card {
+    padding: 8px 9px 6px;
+    border-radius: 8px;
+  }
+
+  .gal-card-title {
+    font-size: 12px;
+    -webkit-line-clamp: 1;
+  }
+
+  .gal-card-text {
+    font-size: 11.5px;
+    line-height: 1.5;
+  }
+
+  .gal-cover {
+    margin: -8px -9px 6px;
+    border-radius: 7px 7px 0 0;
+  }
+
+  .gal-cover-more {
+    display: none;
+  }
+
+  .gal-hint {
+    display: none;
+  }
+}
+
+/* 矮窗口：底部那行手势说明和批量条别把内容挤没 */
+@media (max-height: 420px) {
+  .gal-foot {
+    display: none;
+  }
+
+  .gal-body {
+    padding-bottom: 54px;
+  }
+
+  .gal-bulk {
+    bottom: 8px;
+    max-width: calc(100vw - 20px);
+    flex-wrap: wrap;
+    padding: 6px 10px;
+  }
+
+  .gal-drag-hint {
+    bottom: 8px;
+  }
 }

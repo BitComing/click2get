@@ -57,6 +57,11 @@ fn png_format() -> u32 {
     unsafe { RegisterClipboardFormatW(w!("PNG")) }
 }
 
+/// 浏览器复制"链接文字"时会同时给 CF_UNICODETEXT 和这段 HTML。
+fn html_format() -> u32 {
+    unsafe { RegisterClipboardFormatW(w!("HTML Format")) }
+}
+
 /// 启动监听线程。线程常驻，监控开关只控制"是否读取"。
 pub fn spawn(app: AppHandle) {
     thread::spawn(move || unsafe {
@@ -185,6 +190,10 @@ unsafe fn read_text(state: &AppState) -> Option<Capture> {
         truncated = true;
     }
 
+    // 网页上复制的"链接文字"：HTML 里带 <a href>，正文就是锚文本 ——
+    // 记下网址，前端就能把它做成文字超链接而不是纯文本
+    let href = read_link_href(&text);
+
     Some(Capture {
         kind: "text".into(),
         ts: storage::now_ms(),
@@ -193,8 +202,194 @@ unsafe fn read_text(state: &AppState) -> Option<Capture> {
         hash: None,
         w: None,
         h: None,
+        href,
         truncated,
     })
+}
+
+/// 从剪切板的 HTML 里找出"整段内容就是一个链接"的情况，返回它的网址。
+unsafe fn read_link_href(plain: &str) -> Option<String> {
+    let raw = read_format_bytes(html_format())?;
+    // CF_HTML 是 UTF-8；解不出来就当没有
+    let html = String::from_utf8(raw).ok()?;
+    link_in_html(&html, plain)
+}
+
+/// CF_HTML 的正文在 StartFragment/EndFragment 之间；这两个值是从头算起的字节偏移。
+fn html_fragment(raw: &str) -> &str {
+    let start = header_offset(raw, "StartFragment:").unwrap_or(0);
+    let end = header_offset(raw, "EndFragment:").unwrap_or(raw.len());
+    if start < end && end <= raw.len() && raw.is_char_boundary(start) && raw.is_char_boundary(end) {
+        &raw[start..end]
+    } else {
+        raw
+    }
+}
+
+fn header_offset(raw: &str, key: &str) -> Option<usize> {
+    let at = raw.find(key)?;
+    let rest = &raw[at + key.len()..];
+    let digits: String = rest
+        .trim_start()
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    digits.parse().ok()
+}
+
+/// 只有"HTML 里恰好一个链接、锚文本就是这段正文、锚文本又不是网址本身"才算。
+/// 这样做的好处是绝不会把一整篇文章里的某个链接误当成整条捕获。
+fn link_in_html(raw: &str, plain: &str) -> Option<String> {
+    let frag = html_fragment(raw);
+    let found = anchors(frag);
+    if found.len() != 1 {
+        return None;
+    }
+    let (href, text) = &found[0];
+    let lower = href.to_ascii_lowercase();
+    if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+        return None;
+    }
+    let label = normalize(text);
+    if label.is_empty() || label == normalize(href) {
+        return None;
+    }
+    if label != normalize(plain) {
+        return None;
+    }
+    Some(href.clone())
+}
+
+/// 扫出所有 <a href="...">文字</a>：(网址, 锚文本)。
+fn anchors(frag: &str) -> Vec<(String, String)> {
+    let bytes = frag.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i + 2 < bytes.len() {
+        // 找 "<a" 开头（忽略大小写），后面必须是空白或 '>'
+        if bytes[i] == b'<' && (bytes[i + 1] == b'a' || bytes[i + 1] == b'A') {
+            let after = bytes[i + 2];
+            if is_sp(after) || after == b'>' {
+                if let Some(open_end) = find_byte(frag, i, b'>') {
+                    let attrs = &frag[i + 2..open_end];
+                    if let Some(close) = find_seq(frag, open_end, b"</a>") {
+                        let inner = &frag[open_end + 1..close];
+                        out.push((
+                            attr_value(attrs, "href").unwrap_or_default(),
+                            strip_tags(inner),
+                        ));
+                        i = close + 4;
+                        continue;
+                    }
+                    return out;
+                }
+                return out;
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+fn is_sp(b: u8) -> bool {
+    matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0c)
+}
+
+fn find_byte(s: &str, from: usize, b: u8) -> Option<usize> {
+    let bytes = s.as_bytes();
+    (from..bytes.len()).find(|&i| bytes[i] == b)
+}
+
+/// 忽略大小写地在 s[from..] 里找 ASCII 片段（字节级比较，偏移对字节安全）。
+fn find_seq(s: &str, from: usize, pat: &[u8]) -> Option<usize> {
+    let bytes = s.as_bytes();
+    if pat.is_empty() || bytes.len() < pat.len() {
+        return None;
+    }
+    (from..=bytes.len() - pat.len()).find(|&i| {
+        bytes[i..i + pat.len()]
+            .iter()
+            .zip(pat)
+            .all(|(a, b)| a.eq_ignore_ascii_case(b))
+    })
+}
+
+/// 在标签属性串里取某个属性的值，带引号不带引号都认。
+fn attr_value(attrs: &str, name: &str) -> Option<String> {
+    let bytes = attrs.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        while i < bytes.len() && is_sp(bytes[i]) {
+            i += 1;
+        }
+        let kstart = i;
+        while i < bytes.len() && bytes[i] != b'=' && !is_sp(bytes[i]) {
+            i += 1;
+        }
+        let key = &attrs[kstart..i];
+        while i < bytes.len() && is_sp(bytes[i]) {
+            i += 1;
+        }
+        let mut value: Option<(usize, usize)> = None;
+        if i < bytes.len() && bytes[i] == b'=' {
+            i += 1;
+            while i < bytes.len() && is_sp(bytes[i]) {
+                i += 1;
+            }
+            if i < bytes.len() && (bytes[i] == b'"' || bytes[i] == b'\'') {
+                let quote = bytes[i];
+                i += 1;
+                let start = i;
+                while i < bytes.len() && bytes[i] != quote {
+                    i += 1;
+                }
+                value = Some((start, i));
+                if i < bytes.len() {
+                    i += 1;
+                }
+            } else {
+                let start = i;
+                while i < bytes.len() && !is_sp(bytes[i]) {
+                    i += 1;
+                }
+                value = Some((start, i));
+            }
+        }
+        if key.eq_ignore_ascii_case(name) {
+            if let Some((s, e)) = value {
+                return Some(attrs[s..e].to_string());
+            }
+        }
+    }
+    None
+}
+
+fn strip_tags(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut depth = 0usize;
+    for c in s.chars() {
+        match c {
+            '<' => depth += 1,
+            '>' => depth = depth.saturating_sub(1),
+            _ if depth == 0 => out.push(c),
+            _ => {}
+        }
+    }
+    unescape(&out)
+}
+
+fn unescape(s: &str) -> String {
+    s.replace("&nbsp;", " ")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&apos;", "'")
+        .replace("&amp;", "&")
+}
+
+fn normalize(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// 读图片。优先 PNG 格式（Chrome/Edge/截图工具都给这个），CF_DIB 兜底。
@@ -229,6 +424,7 @@ unsafe fn read_image(state: &AppState) -> Option<Capture> {
         hash: Some(hash),
         w: Some(w),
         h: Some(h),
+        href: None,
         truncated: false,
     })
 }
@@ -351,4 +547,75 @@ unsafe fn alloc_global_bytes(data: &[u8]) -> Option<HANDLE> {
     std::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut u8, data.len());
     let _ = GlobalUnlock(hg);
     Some(as_handle(hg))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 拼一段带真实偏移的 CF_HTML，跟浏览器给的东西同构。
+    fn cf_html(fragment: &str) -> String {
+        let head = "Version:0.9\r\nStartHTML:0000000100\r\nEndHTML:0000000000\r\nStartFragment:0000000000\r\nEndFragment:0000000000\r\n<html><body><!--StartFragment-->";
+        let tail = "<!--EndFragment--></body></html>";
+        let html = format!("{head}{fragment}{tail}");
+        let start = head.len();
+        let end = start + fragment.len();
+        html.replace("StartFragment:0000000000", &format!("StartFragment:{start:010}"))
+            .replace("EndFragment:0000000000", &format!("EndFragment:{end:010}"))
+            .replace("EndHTML:0000000000", &format!("EndHTML:{:010}", html.len()))
+    }
+
+    #[test]
+    fn 复制链接文字时能拿到网址() {
+        let html = cf_html(r#"<a href="https://example.com/a&amp;b=1" title="t">示例 标题</a>"#);
+        assert_eq!(
+            link_in_html(&html, "示例 标题").as_deref(),
+            Some("https://example.com/a&amp;b=1")
+        );
+        assert_eq!(
+            html_fragment(&html).trim(),
+            r#"<a href="https://example.com/a&amp;b=1" title="t">示例 标题</a>"#
+        );
+    }
+
+    #[test]
+    fn 锚文本和正文对不上就不算链接() {
+        let html = cf_html(r#"<a href="https://example.com">标题</a>"#);
+        assert_eq!(link_in_html(&html, "另外一段话"), None);
+    }
+
+    #[test]
+    fn 锚文本就是网址本身交给前端自动识别() {
+        let html = cf_html(r#"<a href="https://a.com/x">https://a.com/x</a>"#);
+        assert_eq!(link_in_html(&html, "https://a.com/x"), None);
+    }
+
+    #[test]
+    fn 多个链接或非网页协议都不算() {
+        let many = cf_html(r#"<a href="https://a.com">甲</a><a href="https://b.com">乙</a>"#);
+        assert_eq!(link_in_html(&many, "甲乙"), None);
+
+        let not_web = cf_html(r#"<a href="file:///C:/x">说明文档</a>"#);
+        assert_eq!(link_in_html(&not_web, "说明文档"), None);
+    }
+
+    #[test]
+    fn 锚文本里的标签与转义被还原() {
+        let html = cf_html(r#"<a href='https://a.com'><span>一段</span> &amp; 两段</a>"#);
+        assert_eq!(
+            link_in_html(&html, "一段 & 两段").as_deref(),
+            Some("https://a.com")
+        );
+    }
+
+    #[test]
+    fn 属性解析支持单双引号与无引号() {
+        assert_eq!(
+            attr_value(r#" href="a b" class="x""#, "href").as_deref(),
+            Some("a b")
+        );
+        assert_eq!(attr_value(" href='x'", "href").as_deref(), Some("x"));
+        assert_eq!(attr_value(" hReF=y", "href").as_deref(), Some("y"));
+        assert_eq!(attr_value(" class=\"href=z\"", "href"), None);
+    }
 }

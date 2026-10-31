@@ -2,7 +2,7 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Click2Get",
   "version": "0.1.0",
-  "identifier": "com.click2get.app",
+  "identifier": "com.click2get.uitest",
   "build": {
     "frontendDist": "../dist"
   },
@@ -13,8 +13,8 @@
         "title": "Click2Get",
         "width": 1020,
         "height": 720,
-        "minWidth": 620,
-        "minHeight": 420,
+        "minWidth": 220,
+        "minHeight": 200,
         "resizable": true,
         "visible": true,
         "backgroundColor": "#F6F6F8",

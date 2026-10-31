@@ -16,6 +16,9 @@ Thumbs.db
 desktop.ini
 *.swp
 
+# 调试时随手截的图 / 探针脚本（docs/_xxx.png、_probe.ps1…）
+docs/_*
+
 # 临时文件（note.json 的原子写中间态）
 *.tmp
 note.json
