@@ -428,38 +428,80 @@ function Workspace({ boot }: { boot: Bootstrap }) {
     return () => window.removeEventListener('resize', check)
   }, [])
 
-  const persist = useCallback(async (doc: any) => {
-    const id = currentIdRef.current
-    if (!id) return
-    // 先清标记：保存期间用户又敲字，onUpdate 会把它重新置上
-    dirtyRef.current = false
-    try {
-      const meta = await invoke<NoteMeta>('save_note', { id, doc })
-      setNotes((prev) => upsert(prev, meta))
-    } catch {
-      /* 保存失败不打断输入，下一次 500ms 会重试 */
-      dirtyRef.current = true
-    }
-  }, [])
+  /** 保存失败后重试了几次（成功就归零，用来算退避与"只提示一次"）。 */
+  const retryRef = useRef(0)
+  /** persist 自己：退避重试要能再调一次，而 useCallback 的闭包里拿不到自己。 */
+  const persistRef = useRef<(doc: any) => Promise<boolean>>(async () => false)
 
-  const flushSave = useCallback(async () => {
+  /**
+   * 落盘当前这篇笔记，返回是否成功。
+   *
+   * 失败不能只把 dirty 标记置回去就完事 —— 那等于把改动赌在"用户接下来还会不会再敲一个字"
+   * 上，切笔记 / 关窗口时就直接丢了（见 issue #7）。这里排一次带退避的重试
+   * （500ms → 1s → 2s…，最多 8s），第一次失败告诉用户，后面的重试不再刷屏。
+   */
+  const persist = useCallback(
+    async (doc: any): Promise<boolean> => {
+      const id = currentIdRef.current
+      if (!id) return false
+      // 先清标记：保存期间用户又敲字，onUpdate 会把它重新置上
+      dirtyRef.current = false
+      try {
+        const meta = await invoke<NoteMeta>('save_note', { id, doc })
+        setNotes((prev) => upsert(prev, meta))
+        retryRef.current = 0
+        return true
+      } catch {
+        dirtyRef.current = true
+        const attempt = (retryRef.current += 1)
+        if (attempt === 1) showToast('保存失败，正在重试…')
+        const delay = Math.min(500 * 2 ** (attempt - 1), 8000)
+        if (saveTimer.current) window.clearTimeout(saveTimer.current)
+        saveTimer.current = window.setTimeout(() => {
+          saveTimer.current = null
+          const ed = editorRef.current
+          // 中途切了笔记 / 删了笔记：这一轮重试作废（onUpdate 会给新笔记另排一次）
+          if (!ed || !currentIdRef.current || !dirtyRef.current) return
+          void persistRef.current(ed.getJSON())
+        }, delay)
+        return false
+      }
+    },
+    [showToast],
+  )
+
+  useEffect(() => {
+    persistRef.current = persist
+  }, [persist])
+
+  /**
+   * 切笔记 / 退出前的那一次落盘：返回是否存上了。
+   *
+   * 失败会立刻再试一次（这一次是同步等结果的），还不行就如实返回 false，
+   * 让调用方决定要不要提醒用户 —— 而不是悄悄地丢。
+   */
+  const flushSave = useCallback(async (): Promise<boolean> => {
     const ed = editorRef.current
     const id = currentIdRef.current
-    if (!ed || !id) return
+    if (!ed || !id) return true
     if (saveTimer.current) {
       window.clearTimeout(saveTimer.current)
       saveTimer.current = null
     }
     // 没改过就别存：save_note 会刷新 updatedAt，把这篇笔记顶到侧栏最上面
-    if (!dirtyRef.current) return
+    if (!dirtyRef.current) return true
     dirtyRef.current = false
-    try {
-      const meta = await invoke<NoteMeta>('save_note', { id, doc: ed.getJSON() })
-      setNotes((prev) => upsert(prev, meta))
-    } catch {
-      /* ignore */
-      dirtyRef.current = true
+    for (let i = 0; i < 2; i++) {
+      try {
+        const meta = await invoke<NoteMeta>('save_note', { id, doc: ed.getJSON() })
+        setNotes((prev) => upsert(prev, meta))
+        retryRef.current = 0
+        return true
+      } catch {
+        dirtyRef.current = true
+      }
     }
+    return false
   }, [])
 
   /** 删笔记 / 切笔记前把待保存的定时器掐掉，不然删完又会被写回来。 */
@@ -469,6 +511,8 @@ function Workspace({ boot }: { boot: Bootstrap }) {
       saveTimer.current = null
     }
     dirtyRef.current = false
+    // 连退避重试一起取消：笔记都删了，重试再跑一次会把它又写回磁盘（见 issue #7）
+    retryRef.current = 0
   }, [])
 
   /**
@@ -519,6 +563,12 @@ function Workspace({ boot }: { boot: Bootstrap }) {
       setCurrentId(full.id)
       currentIdRef.current = full.id
       const ed = editorRef.current
+      // 换笔记了：上一篇没排完的保存 / 退避重试一律作废，别把旧内容写进新笔记
+      if (saveTimer.current) {
+        window.clearTimeout(saveTimer.current)
+        saveTimer.current = null
+      }
+      retryRef.current = 0
       loadingRef.current = true
       // normalizeDoc：把旧笔记里被 lift 到块外的段落收回归属，行的行为才一致
       ed?.commands.setContent(normalizeDoc(full.doc ?? EMPTY_DOC), { emitUpdate: false })
@@ -934,11 +984,16 @@ function Workspace({ boot }: { boot: Bootstrap }) {
     }
   }, [])
 
-  // 退出握手：先落盘，再退出
+  // 退出握手：先落盘，再退出。存不上也要让用户知道（Rust 侧 800ms 后无论如何会退出，
+  // 所以这里至少把那句实话弹出来 + 留一条日志）
   useEffect(() => {
     const un = listen('flush-save', async () => {
       try {
-        await flushSave()
+        const ok = await flushSave()
+        if (!ok) {
+          console.error('退出前落盘失败：最后一次改动没能写进磁盘')
+          showToast('还有改动没存上，请检查数据目录能否写入')
+        }
       } finally {
         invoke('quit_app').catch(() => {})
       }
@@ -946,11 +1001,17 @@ function Workspace({ boot }: { boot: Bootstrap }) {
     return () => {
       un.then((f) => f())
     }
-  }, [flushSave])
+  }, [flushSave, showToast])
 
   const switchNote = async (id: string) => {
     if (id === currentIdRef.current) return
-    await flushSave()
+    const saved = await flushSave()
+    if (!saved) {
+      // 这边没存上就切走 = 那几百毫秒的改动直接丢。宁可停在这儿，让用户再按一次。
+      showToast('这篇还没存上，先别切走（正在重试）')
+      void persistRef.current(editorRef.current?.getJSON())
+      return
+    }
     const full = await invoke<NoteFull>('load_note', { id })
     showNote(full)
   }
