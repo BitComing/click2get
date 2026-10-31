@@ -52,8 +52,37 @@ function wrapImages(node: Json): Json {
   return out
 }
 
+/**
+ * 段落里套段落 —— 那条 bug 留下的伤，顺手修掉。
+ *
+ * 旧版本的 wrapImages 会给"已经行内的图片"再包一层，写回磁盘后就长成
+ * `paragraph > paragraph > image`。这里把**整段孩子都是块**的外层段落拆开，
+ * 让里面的块回到父级（段落正常只装行内节点，所以这只可能命中坏数据）。
+ *
+ * 判据取严一点：外层的孩子必须**全都是**块（段落 / 标题）才拆，
+ * 混着文字的那种结构不动手 —— 宁可留着让人看见，也不要乱改内容。
+ */
+function unwrapNestedBlocks(node: Json): Json {
+  const out = copy(node)
+  if (!Array.isArray(out.content)) return out
+  const kids: Json[] = []
+  for (const child of out.content) {
+    const fixed = unwrapNestedBlocks(child)
+    const onlyBlocks =
+      isParagraph(fixed) &&
+      Array.isArray(fixed.content) &&
+      fixed.content.length > 0 &&
+      fixed.content.every((c: Json) => c?.type === 'paragraph' || c?.type === 'heading')
+    if (onlyBlocks) kids.push(...fixed.content.map(unwrapNestedBlocks))
+    else kids.push(fixed)
+  }
+  out.content = kids
+  return out
+}
+
 export function normalizeDoc<T extends Json>(doc: T): T {
-  const source = wrapImages(doc ?? {})
+  // 先把套深了的段落拆开，再按块级 / 行内两种图片分别处理
+  const source = wrapImages(unwrapNestedBlocks(doc ?? {}))
   const content = Array.isArray(source?.content) ? (source.content as Json[]) : []
   if (content.length === 0) return source as T
 

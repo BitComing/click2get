@@ -82,7 +82,20 @@ check('空捕获块被摘掉', normalizeDoc(doc(cb(), p(text('只剩这句')))),
 // ⑦ 新建笔记那种"占位空行 + 空块"：空行不留
 check('开头的占位空行丢掉', normalizeDoc(doc(p(), cb(p(text('正文'))))), doc(cb(p(text('正文')))))
 
-// ⑧ 空文档不炸
+// ⑧ 旧 bug 留下的伤：已经被套成 `paragraph > paragraph > image` 的笔记要能自己长回来
+const damaged = doc(cb(p(text('上面一行')), p(p(img('H6')))))
+check(
+  '已经从坏数据里把多套的段落拆掉',
+  normalizeDoc(damaged),
+  doc(cb(p(text('上面一行')), p(img('H6')))),
+)
+check('拆完再规整结果不变（幂等）', normalizeDoc(normalizeDoc(damaged) as Json), normalizeDoc(damaged))
+
+// 混着文字的异常结构不硬拆（宁可留着，也不乱改内容）
+const mixed = doc(cb(p(text('一句话'), p(img('H7')))))
+check('段落里夹着块、又夹着文字：原样保留', normalizeDoc(mixed), mixed)
+
+// ⑨ 空文档不炸
 check('空 content 原样返回', normalizeDoc({ type: 'doc', content: [] }), { type: 'doc', content: [] })
 
 console.log(failed === 0 ? '\n全部通过' : `\n失败 ${failed} 个`)
