@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "tray-popup",
+  "description": "托盘弹窗（label = tray）：只收事件，别的一概不给。它靠 listen 同步监控开关 / 主题，没有这份 capability 时 listen 会被 ACL 拒掉（issue #4）。",
+  "windows": ["tray"],
+  "permissions": ["core:event:default"]
+}
